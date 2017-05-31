@@ -1,0 +1,16 @@
+.pokemon-sprite {
+  display: inline-block;
+  background-image: url(../../../icons-sprite.png);
+  background-repeat: no-repeat;
+  top: 6px;
+  position: relative;
+  -moz-transform-origin: 0 0;
+  height: 48px;
+  width: 48px;
+
+  @for $i from 1 through 251 {
+    &.n#{$i} {
+      background-position: -#{(($i - 1) % 31) * 48}px -#{floor(($i - 1) / 31) * 48}px
+    }
+  }
+}
