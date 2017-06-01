@@ -1,67 +1,121 @@
 # DO NOT USE NOTEPAD TO EDIT CONFIG FILES!! USE NOTEPAD ++ INSTEAD.
-# Authentication settings
-#auth-service: ptc         # ptc (default) or google
+# Uncomment a line when you want to change its default value (Remove # at the beginning)
+# Please ensure to leave a space after the : (example setting: value)
+# username, password, location and gmaps-key are required
+
+
+
+# Important settings
+
+#auth-service: ptc			# ptc (default) or google
 #username:
 #password:
 
+#accountcsv:				# Load accounts from a CSV file containing "auth-service,username,password" lines.
+gmaps-key:					# your Google Maps API key
+hash-key: []				# Needed to scan. For multiple [xxxxxxxxxxxxxxxxxxxx, xxxxxxxxxxxxxxxxxxxx]
+
+
+
 # Database settings
-#db-type: mysql        # sqlite (default) or mysql
-#db-host: 127.0.0.1              # required for mysql
-#db-name:                # required for mysql
-#db-user:                # required for mysql
-#db-pass:                # required for mysql
-#db-port:               # default 3306
-#db-max_connections:	# default 5
-#db-threads:			# default 1
+
+db-type: mysql				# sqlite (default) or mysql
+db-host:					# required for mysql
+db-name:					# required for mysql
+db-user:					# required for mysql
+db-pass:					# required for mysql
+#db-port:					# default 3306
+#db-max_connections:		# default 5; due to the nature of automated worker assignment, unless you're specifically defining workers, this will always be equal to the number of accounts available.
+#db-threads:				# default 1
+
+
 
 # Search settings
-location: 
-speed_limit: 32			# max speed limit in km/hr, varies randomly between 70-100%. Overrides scan-delay
-jitter
-#no-gyms               # disables gym scanning (default false)
-#no-pokemon:            # disables pokemon scanning (default false)
-#no-pokestops			# disables pokestop scanning (default false)
-ignore-list: []           # list of Pokemon IDs to ignore parsing (default [])
-#login-delay: 			# default 6
-scan-delay:           # default 10; used for the scan-retry delay
-step-limit:            # default 12
-#step_distance: 50		# inoperative currently
-scan_retries: 2
-max-failures: 5
-#gym-info:              # enables detailed gym info collection (default false)
-#min-seconds-left:      # time that must be left on a spawn before considering it too late and skipping it (default 0)
-#status-name:           # enables writing status updates to the database - if you use multiple processes, each needs a unique value
-account-rest-interval: 900
-beehive
-captcha-solving
-captcha-key: 
 
-#Pokemon IV 
+location: 
+speed_limit:				# max speed limit in km/hr, varies randomly between 70-100%. Overrides scan-delay
+step-limit:					# default 12
+jitter
+#login-delay:				# default 6; How long we wait between starting up individual threads.
+#scan-delay:				# default 10; used for the scan-retry delay, otherwise overridden by the speed limiter
+#spawn_delay: 15			# default 10; how long we wait after a spawnpoint produces a pokemon, in seconds
+#scan_retries: 1			# Scan attempts *after* the initial scan
+#max-failures: 1			# Maximum number of failed scans before retiring the account.
+#account-rest-interval:		# Seconds for accounts to rest when they fail or are switched out. (default=7200)
+#account-search-interval:	# Seconds for accounts to search before switching to a new account. (default=0)
+#spawns_per_worker:			# how many spawnpoints a single worker can handle. This is typically constant no matter where you scan. If a hex exceeds this, it spawns another worker.
+#workers_per_hive:			# how many workers per hex area. If spawns_per_worker is enabled, map will spawn at LEAST this many workers per hive
+
+
+
+# Extra search settings
+
+#no-gyms					# disables gym scanning (default false)
+#no-pokemon					# disables pokemon scanning (default false); increases "worker jump" distance to 450m. Recommend to increase speed limit to ~120 since these don't disappear with speed.
+#no-pokestop				# disables pokestop scanning (default false)
+
+#skip-empty					# Standard hexagon pattern creation, skipping areas with no scannable areas in them. Also no longer creates threads or assigns workers to empty spots when used with beehive
+#usestops					# Use with skip-empty to standard hex-scan areas within 900m of a fort (stop/gym). Handy for scanning large areas
+#spawnpoint-scanning		# Direct spawnpoint scanning. Also no longer creates threads or assigns workers to empty spots when used with beehive
+#sscluster					# Spawnpoint clustering. Defaulted to 4 minutes (240 seconds) and 70m radius (only active when spawnpoint-scanning active)
+#cluster-time				# Default 240; Spawnpoint scan will wait up to this value (in seconds) + spawn_delay to get maxmimum pokemon in a single scan. 4 minutes typically reduces scanned locations by ~30%
+#beehive
+#by_hex_count:				# Minimum number of hex locations to create for scanning. Be advised: WILL finish creating the current ring, so if you set it between 2 and 6, it will create 7 (to finish the ring)
+#leaps:						# Number of complete beehive 'rings' to create. Rings:Hexes = 1:1, 2:7, 3:19, 4:37, 5:61, 6:91, 7:127...
+#by_valid_count:			# Number of hexagons that have scannable locations (forts, spawns) within their boundaries. Will continue to grow until this number is satisfied, useful if you have limited workers but sparse areas.
+
+#ignore-list: []			# list of Pokemon IDs to ignore parsing (default []); In layman's terms: these pokemon never see the database; they ARE still scanned and ARE still processed for spawnpoint information though!
+#gym-info:					# enables detailed gym info collection (default false)
+#min-seconds-left:			# time (in seconds) that must be left on a spawn before considering it too late and skipping it (default 0)
+#step_distance:				# inoperative currently
+
+
+
+# Pokemon IV 
+
 #encounter
 #encounter-delay: 5
-#encounter-whitelist: [26,28,38,40,45,51,62,65,68,71,76,82,83,87,89,91,94,101,115,130,132,136,139,141,144,145,146,150,151,3,5,6,9,12,24,30,31,33,34,36,44,53,55,57,59,64,67,73,75,78,80,85,88,99,103,105,106,110,112,113,117,119,121,122,131,134,135,137,142,143,148,149,2,4,8,11,14,15,18,20,22,27,37,39,42,47,49,50,52,54,56,61,63,66,70,72,74,77,79,81,86,90,93,95,97,100,102,104,107,108,109,111,114,116,118,123,124,125,126,128,138,140,147,25,26,129,1,7]
-#encounter-blacklist: [10,13,16,17,19,20,23,25,27,29,32,37,39,41,43,46,48,50,52,54,56,58,60,63,66,69,72,74,75,77,81,84,86,88,90,92,95,96,98,100,102,104,111,116,118,120,133,138,140,147]  # blacklist of pokemon ids to NOT encounter. Syntax [id,id,id,id] (Do not use with whitelist)
+#encounter-whitelist: []
+#encounter-blacklist: []	# blacklist of pokemon ids to NOT encounter. Syntax [id,id,id,id] (Do not use with whitelist)
+
+
 
 # Misc
-gmaps-key:              # your Google Maps API key
-#proxy:                 # Proxy URL e.g. socks5://127.0.0.1:9050 or a list of proxies e.g. [socks5://127.0.0.1:9050,socks5://127.0.0.1:9050]
-#proxy-timeout:         # Timeout before proceeding with next proxy while checking if the proxy works, (default 5)
-#proxy-display:         # Used with -ps, full = display complete proxy address. Index = displays just the index for that proxy (default index)
-#webhook:               # webhook URL (including http://)
-#webhook-updates-only	# only send updates to webhooks, (excludes gyms & non-lured pokéstops)
-#wh-threads: 50
-#disable-clean
-#purge-data: 24			# Purge database after X hours
+
+#captcha-solving
+#captcha-key: 
+#status-name:				# enables writing status updates to the database - if you use multiple processes, each needs a unique value
+#print-status				# Enable ENTER to switch between log view and a status view.
+#status-page-password:		# enables and protects the /status page to view status of all workers
+#disable-clean				# Stops cleaning the db from old scanned locations, workers that might be in use (gets cleared after 15 mins), runs the purge database stuff, etc. (its a good idea to keep only one process running it)
+#purge-data:				# Purge database after X hours
+
+
+
+# Proxy settings
+
+#proxy: []					# Proxy URL e.g. xxxxxx://127.0.0.1:9050 or a list of proxies e.g. [xxxxxx://127.0.0.1:9050,xxxxxx://127.0.0.1:9050]
+#dead-proxies: []
+#proxy-timeout:				# Timeout before proceeding with next proxy while checking if the proxy works, (default 5)
+#proxy-display:				# Used with -ps, full = display complete proxy address. Index = displays just the index for that proxy (default index)
+
+
+
+# Webhook settings
+
+#webhook:					# webhook URL (including http://)
+#webhook-updates-only  		# only send updates to webhooks, (excludes gyms & non-lured pokéstops)
+#wh-threads:				# Number of webhook threads; increase if the webhook queue falls behind. (default=1)
+
+
 
 # Webserver settings
-#host:                  # address to listen on (default 127.0.0.1)
-#port: 5001                 # port to listen on (default 5000)
-#locale:                # pokemon translation
-#ssl-certificate:       # path to ssl certificate
-#ssl-privatekey:        # path to ssl private key
-#encrypt-lib:           # path to encrypt lib to be used instead of the shipped ones
-#status-page-password:  # enables and protects the /status page to view status of all workers
 
-#Uncomment a line when you want to change its default value (Remove # at the beginning)
-#Please ensure to leave a space after the : (example setting: value)
-#username, password, location and gmaps-key are required
+#host:						# address to listen on (default 127.0.0.1)
+#port:                  	# port to listen on (default 5000)
+#locale:                	# pokemon translation
+#ssl-certificate:       	# path to ssl certificate
+#ssl-privatekey:        	# path to ssl private key
+#encrypt-lib:           	# path to encrypt lib to be used instead of the shipped ones
+
+
