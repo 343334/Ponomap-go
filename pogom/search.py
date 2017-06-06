@@ -640,8 +640,8 @@ def ringappend(args, loc, results, steps):
         if args.scheduler == 'HexSearch':
             log.info("Hex search, adding location")
         if len(points) > 0:
-            log.info("Found {} stops or spawns, adding location".format(len(points)))
-        results.append((loc[0], loc[1], 0, len(points)))
+            log.info("Found {} stops or spawns, adding location".format(len(points[0])))
+        results.append((loc[0], loc[1], 0, len(points[0])))
         
     return results
 
