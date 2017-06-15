@@ -625,6 +625,10 @@ def ringappend(args, loc, results, steps):
             log.info("{} Spawnpoints found in this hex".format(len(spawns)))
             if len(spawns) > 0:
                 points.append(spawns)
+                #log.debug(len(spawns))  # True number of spawns
+                #log.debug(len(spawns[0]))  # Always 4 (lat/lon/appear/disappear dict)
+                #log.debug(len(points))  # Always 1
+                #log.debug(len(points[0]))  # True number of spawns
         if args.usestops:
             gyms = Gym.get_gyms_in_hex(loc, steps)
             log.info("{} Gyms found in this hex".format(len(gyms)))
@@ -635,14 +639,14 @@ def ringappend(args, loc, results, steps):
             if len(stops) > 0:
                 points.append(stops)
         
-
-    if args.scheduler == 'HexSearch' or (len(points) > 0):
-        if args.scheduler == 'HexSearch':
-            log.info("Hex search, adding location")
+    if args.scheduler == 'HexSearch':
+        log.info("Hex search, adding location")
+        results.append((loc[0], loc[1], 0, len(points)))
+    else:
         if len(points) > 0:
             log.info("Found {} stops or spawns, adding location".format(len(points[0])))
-        results.append((loc[0], loc[1], 0, len(points[0])))
-        
+            results.append((loc[0], loc[1], 0, len(points[0])))
+
     return results
 
 
