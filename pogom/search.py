@@ -681,6 +681,8 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                 loginDelayLock.release()
             status['message'] = 'Getting closest worker'
             account = WorkerStatus.get_closest_available(next_location[0], next_location[1], wid)
+            if not account['lat']:
+                account['lat'], account['lon'] = next_location
             step_location = account['lat'], account['lon']
             status['message'] = 'Switching to account {}'.format(account['username'])
             log.debug('current time: {}'.format(now()))
@@ -696,6 +698,8 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
             status['skip'] = 0
             status['captcha'] = 0
             status['location'] = False
+            if not account['last_scan']:
+                account['last_scan'] = now()
             status['last_scan_time'] = account['last_scan']
             status['hashuse'] = 0
             status['retries'] = 0
