@@ -63,13 +63,6 @@ def init_database(app, position):
     app.config['DATABASE'] = db
     flaskDb.init_app(app)
 
-    if not args.only_server:
-        if len(args.accounts) > 0:
-            WorkerStatus.populate_db(args.accounts, position)
-            
-        #if len(args.hash_key) > 0:
-            #HashKeys.populate_db(args.hash_key)
-
     return db
 
 
@@ -1014,7 +1007,7 @@ class WorkerStatus(BaseModel):
         return query
 
     @classmethod
-    def populate_db(cls, accounts, position):
+    def populate_db(cls, accounts):
         query = (WorkerStatus
                  .select(WorkerStatus.username)
                  .dicts())
@@ -1033,8 +1026,8 @@ class WorkerStatus(BaseModel):
                             'skip': 0,
                             'captcha': 0,
                             'last_modified': datetime.utcnow(),
-                            'lat': position[0],
-                            'lon': position[1],
+                            'lat': None,
+                            'lon': None,
                             'last_scan': now(),
                             'flag': 0,
                             'message': 'Unused'
@@ -1962,6 +1955,12 @@ def verify_database_schema(db):
                       db_ver, db_schema_version)
             log.error("Please upgrade your code base or drop all tables in your database.")
             sys.exit(1)
+        if not args.only_server:
+            if len(args.accounts) > 0:
+                WorkerStatus.populate_db(args.accounts)
+            
+            if len(args.hash_key) > 0:
+                HashKeys.populate_db(args.hash_key)
 
 
 def database_migrate(db, old_ver):
