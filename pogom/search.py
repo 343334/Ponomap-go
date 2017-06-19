@@ -48,7 +48,7 @@ from geopy.distance import vincenty
 from . import config
 from .models import parse_map, GymDetails, parse_gyms, MainWorker, WorkerStatus, Spawnpoints, HashKeys, Gym, Pokestop
 from .fakePogoApi import FakePogoApi
-from .utils import now, cur_sec, get_args, equi_rect_distance
+from .utils import now, cur_sec, get_args, equi_rect_distance, clear_dict_response
 from .transform import get_new_coords
 from . import schedulers
 
@@ -147,10 +147,10 @@ def status_printer(threadStatus, search_items_queue_array, db_updates_queue, wh_
             solved = 0
             retrycount = 0
             hashcount = 0
+            elapsed = 1
             for item in threadStatus:
-                if 'starttime' in threadStatus[item]:
-                    elapsed = now() - threadStatus['Overseer']['time']
-                    if elapsed == 0:
+                elapsed = now() - threadStatus['Overseer']['time']
+                if elapsed == 0:
                         elapsed = 1
                 if 'skip' in threadStatus[item]:
                     skip_total += threadStatus[item]['skip']
@@ -169,23 +169,13 @@ def status_printer(threadStatus, search_items_queue_array, db_updates_queue, wh_
                 if 'hashuse' in threadStatus[item]:
                     hashcount += threadStatus[item]['hashuse']
 
-            sph = successcount * 3600 / elapsed
-            eph = emptycount * 3600 / elapsed
-            cph = captchacount * 3600 / elapsed
-            rpm = hashcount * 60 / elapsed
-            spent = solved * 0.003
-            ccost = cph * 0.003
-            cmonth = ccost * 24
-            usercount = WorkerStatus.get_active(args.status_name)
-            totalused = WorkerStatus.get_active()
-
             # Print the queue length.
             search_items_queue_size = 0
             for i in range(0, len(search_items_queue_array)):
                 search_items_queue_size += search_items_queue_array[i].qsize()
 
             status_text.append('Area: {}, Queues: {} scans, {} DB, {} webhook.  Skipped items: {}. Spare accounts: {} | On hold: {} | In use: {}'
-                               .format(args.status_name, search_items_queue_size, db_updates_queue.qsize(), wh_queue.qsize(), skip_total, WorkerStatus.get_unused_accounts(), WorkerStatus.get_held_accounts(), usercount))
+                               .format(args.status_name, search_items_queue_size, db_updates_queue.qsize(), wh_queue.qsize(), skip_total, WorkerStatus.get_unused_accounts(), WorkerStatus.get_held_accounts(), WorkerStatus.get_active(args.status_name)))
 
             # Print status of overseer.
             status_text.append('Started: {} | {} Overseer: {}'.format(time.strftime("%H:%M:%S", time.gmtime(threadStatus['Overseer']['time'])), threadStatus['Overseer']['scheduler'], threadStatus['Overseer']['message']))
@@ -220,6 +210,10 @@ def status_printer(threadStatus, search_items_queue_array, db_updates_queue, wh_
             status_text.append(status.format('Worker ID', 'Runtime', 'User', 'Proxy', 'Success', 'Failed', 'Empty', 'Skipped', 'Captchas', 'Retries', 'Hashes', 'Message'))
             for item in sorted(threadStatus):
                 if(threadStatus[item]['type'] == 'Worker'):
+                    if 'starttime' in threadStatus[item]:
+                        started = threadStatus[item]['starttime']
+                    else:
+                        started = now()
                     current_line += 1
 
                     # Skip over items that don't belong on this page.
@@ -228,7 +222,7 @@ def status_printer(threadStatus, search_items_queue_array, db_updates_queue, wh_
                     if current_line > end_line:
                         break
 
-                    status_text.append(status.format(item, str(timedelta(seconds=elapsed)), threadStatus[item]['user'], threadStatus[item]['proxy_display'], threadStatus[item]['success'], threadStatus[item]['fail'], threadStatus[item]['noitems'], threadStatus[item]['skip'], threadStatus[item]['captcha'], threadStatus[item]['retries'], threadStatus[item]['hashuse'], threadStatus[item]['message']))
+                    status_text.append(status.format(item, abs(now() - started), threadStatus[item]['user'], threadStatus[item]['proxy_display'], threadStatus[item]['success'], threadStatus[item]['fail'], threadStatus[item]['noitems'], threadStatus[item]['skip'], threadStatus[item]['captcha'], threadStatus[item]['retries'], threadStatus[item]['hashuse'], threadStatus[item]['message']))
 
         elif display_type[0] == 'failedaccounts':
             status_text.append('-----------------------------------------')
@@ -247,7 +241,7 @@ def status_printer(threadStatus, search_items_queue_array, db_updates_queue, wh_
                 status_text.append(status.format(account['account']['username'], time.strftime('%H:%M:%S', time.localtime(account['last_fail_time'])), account['reason']))
 
         # Print the status_text for the current screen.
-        status_text.append('Total active: {}  |  Success: {} ({}/hr) | Fails: {} | Empties: {} ({}/hr) | Skips: {} | Retries: {} | Hashes: {} ({}/min) | Captchas: {} ({}/hr)|${:2}/hr|${:2}/d|${:2} spent'.format(totalused, successcount, sph, failcount, emptycount, eph, skip_total, retrycount, hashcount, rpm, captchacount, cph, ccost, cmonth, spent))
+        status_text.append('Total active: {}  |  Success: {} ({}/hr) | Fails: {} | Empties: {} ({}/hr) | Skips: {} | Retries: {} | Hashes: {} ({}/min) | Captchas: {} ({}/hr)|${:2}/hr|${:2}/d|${:2} spent'.format(WorkerStatus.get_active(), successcount, (successcount * 3600 / elapsed), failcount, emptycount, (emptycount * 3600 / elapsed), skip_total, retrycount, hashcount, (hashcount * 60 / elapsed), captchacount, (captchacount * 3600 / elapsed), (captchacount * 3600 / elapsed) * 0.003, ((captchacount * 3600 / elapsed) * 0.003 * 24), (solved * 0.003)))
         status_text.append('Page {}/{}. Page number to switch pages. F to show on hold accounts. <ENTER> alone to switch between status and log view'.format(current_page[0], total_pages))
         # Clear the screen.
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -298,21 +292,6 @@ def worker_status_db_thread(threads_status, name, db_updates_queue):
                     'message': status['message'],
                     'method': status['scheduler'],
                     'last_modified': datetime.utcnow()
-                }
-            if status['type'] == 'Worker':
-                workers[status['user']] = {
-                    'username': status['user'],
-                    'worker_name': name,
-                    'success': status['success'],
-                    'fail': status['fail'],
-                    'no_items': status['noitems'],
-                    'skip': status['skip'],
-                    'captcha': status['captcha'],
-                    'last_modified': datetime.utcnow(),
-                    'lat': status['lat'],
-                    'lon': status['lon'],
-                    'last_scan': status['lastscan'],
-                    'message': status['message']
                 }
         if overseer is not None:
             db_updates_queue.put((MainWorker, {0: overseer}))
@@ -413,7 +392,6 @@ def search_overseer_thread(args, new_location_queue, pause_bit, heartb, db_updat
                 thrds = 0
 
             locations = generate_hive_locations(args, current_location, step_distance, args.step_limit, thrds)
-            log.debug(locations)
 
             if not workersstarted:
                 x = 1
@@ -496,6 +474,7 @@ def search_overseer_thread(args, new_location_queue, pause_bit, heartb, db_updat
                 scheduler_array[i].location_changed(locations[x])  # above code should have created the same number of arrays as locations
                 log.debug('Schedulers: {} | Locations: {}'.format(len(scheduler_array), len(locations)))  # let's check.
                 x += 1
+            del locations
 
         # If there are no search_items_queue either the loop has finished (or been
         # cleared above) -- either way, time to fill it back up
@@ -534,8 +513,6 @@ def generate_hive_locations(args, current_location, step_distance, step_limit, t
 
     results = ringappend(args, current_location, results, step_limit)
     hexes, ring, count, limit = delta
-    log.info("Hex {}".format(hexes))
-    log.info("Ring {}".format(ring))
 
     loc = current_location
 
@@ -558,96 +535,54 @@ def generate_hive_locations(args, current_location, step_distance, step_limit, t
         loc = get_new_coords(loc, xdist * (1.5 * step_limit - 0.5), EAST)
         hexes += 1
         results = ringappend(args, loc, results, step_limit)
-        log.info("Hex {}".format(hexes))
 
         for i in range(ring):
             loc = get_new_coords(loc, ydist * step_limit, NORTH)
             loc = get_new_coords(loc, xdist * (1.5 * step_limit - 1), WEST)
             hexes += 1
             results = ringappend(args, loc, results, step_limit)
-            log.info("Hex {}".format(hexes))
 
         for i in range(ring):
             loc = get_new_coords(loc, ydist * (step_limit - 1), SOUTH)
             loc = get_new_coords(loc, xdist * (1.5 * step_limit - 0.5), WEST)
             hexes += 1
             results = ringappend(args, loc, results, step_limit)
-            log.info("Hex {}".format(hexes))
 
         for i in range(ring):
             loc = get_new_coords(loc, ydist * (2 * step_limit - 1), SOUTH)
             loc = get_new_coords(loc, xdist * 0.5, WEST)
             hexes += 1
             results = ringappend(args, loc, results, step_limit)
-            log.info("Hex {}".format(hexes))
 
         for i in range(ring):
             loc = get_new_coords(loc, ydist * (step_limit), SOUTH)
             loc = get_new_coords(loc, xdist * (1.5 * step_limit - 1), EAST)
             hexes += 1
             results = ringappend(args, loc, results, step_limit)
-            log.info("Hex {}".format(hexes))
 
         for i in range(ring):
             loc = get_new_coords(loc, ydist * (step_limit - 1), NORTH)
             loc = get_new_coords(loc, xdist * (1.5 * step_limit - 0.5), EAST)
             hexes += 1
             results = ringappend(args, loc, results, step_limit)
-            log.info("Hex {}".format(hexes))
-
         # Back to start
         for i in range(ring - 1):
             loc = get_new_coords(loc, ydist * (2 * step_limit - 1), NORTH)
             loc = get_new_coords(loc, xdist * 0.5, EAST)
             hexes += 1
             results = ringappend(args, loc, results, step_limit)
-            log.info("Hex {}".format(hexes))
 
         loc = get_new_coords(loc, ydist * (2 * step_limit - 1), NORTH)
         loc = get_new_coords(loc, xdist * 0.5, EAST)
 
         ring += 1
-        log.info("Ring {}".format(ring))
 
-    log.info('Hexes calculated: {} | Rings/Leaps: {} | Valid hexes: {}'.format(hexes, ring, len(results)))
-    log.debug(results[0])
-    time.sleep(5)
+    log.info('Hexes calculated: {} | Rings/Leaps: {} | Populated hexes: {}'.format(hexes, ring, len(results)))
+    time.sleep(2)
     return results
 
 def ringappend(args, loc, results, steps):
-    points = []
-    spawns = []
-    gyms = []
-    stops = []
-    if args.scheduler != 'HexSearch':
-        if config['parse_pokemon']:
-            spawns = Spawnpoints.get_spawnpoints_in_hex(loc, steps)
-            log.info("{} Spawnpoints found in this hex".format(len(spawns)))
-            if len(spawns) > 0:
-                points.append(spawns)
-                #log.debug(len(spawns))  # True number of spawns
-                #log.debug(len(spawns[0]))  # Always 4 (lat/lon/appear/disappear dict)
-                #log.debug(len(points))  # Always 1
-                #log.debug(len(points[0]))  # True number of spawns
-        if args.usestops:
-            gyms = Gym.get_gyms_in_hex(loc, steps)
-            log.info("{} Gyms found in this hex".format(len(gyms)))
-            stops = Pokestop.get_stops_in_hex(loc, steps)
-            log.info("{} Stops found in this hex".format(len(stops)))
-            if len(gyms) > 0:
-                points.append(gyms)
-            if len(stops) > 0:
-                points.append(stops)
-        
-    if args.scheduler == 'HexSearch':
-        log.info("Hex search, adding location")
-        results.append((loc[0], loc[1], 0, len(points)))
-    else:
-        if len(points) > 0:
-            log.info("Found {} stops or spawns, adding location".format(len(points[0])))
-            results.append((loc[0], loc[1], 0, len(points[0])))
-
-    return results
+    
 
 
 def search_worker_thread(args, account_failures, search_items_queue, pause_bit, status, dbq, whq, key_scheduler, wid):
@@ -655,15 +590,11 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
     log.debug('Search worker thread starting')
     status['csolved'] = 0
     slimit = args.speed_limit
-    args.scan_delay
     firstrun = True
-    grabbednew = False
-    
 
     # The outer forever loop restarts only when the inner one is intentionally exited - which should only be done when the worker is failing too often, and probably banned.
     # This reinitializes the API and grabs a new account from the queue.
     while True:
-        status['starttime'] = now()
         try:
             # Get an account.
             #account = account_queue.get()
@@ -676,11 +607,12 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                 # Delay each thread start time so that logins occur after delay.
                 loginDelayLock.acquire()
                 delay = (args.login_delay) + (old_div((random.random() - .5), 2))
-                log.debug('Delaying thread startup for %.2f seconds', delay)
+                status['message'] = 'Delaying thread startup for ' + str(delay) + ' seconds'
                 time.sleep(delay)
                 loginDelayLock.release()
             status['message'] = 'Getting closest worker'
             account = WorkerStatus.get_closest_available(next_location[0], next_location[1], wid)
+            status['starttime'] = now()
             if not account['lat']:
                 account['lat'], account['lon'] = next_location
             step_location = account['lat'], account['lon']
@@ -689,7 +621,6 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
             status['user'] = account['username']
             status['pass'] = account['pass']
             log.info(status['message'])
-            log.debug('worker location {}, target location {}'.format(step_location, next_location))
 
             # New lease of life right here.
             status['fail'] = 0
@@ -733,7 +664,6 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                              .where(WorkerStatus.username == account['username']))
                     query.execute()
                     break  # Exit this loop to get a new account and have the API recreated.
-                log.debug('finished failure check')
                 
                 while pause_bit.is_set():
                     status['message'] = 'Scanning paused'
@@ -750,29 +680,25 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                                  .where(WorkerStatus.username == account['username']))
                         query.execute()
                         break
-                log.debug('finished ari/asi check')
 
                 #if not firstrun:
                 step, next_location, appears, leaves = search_items_queue.get()
                 status['message'] = 'Got new search item'
 
                 paused = False
-                giveup = False
                 
                 randomizer = random.uniform(0.8, 1)
-                log.debug('randomized')
+                #log.debug('randomized')
                 distance = equi_rect_distance(step_location, next_location)
                 elapsed = now() - account['last_scan']
-                log.debug('got distance')
+                #log.debug('got distance')
                 if distance > 15000:
                     args.speed_limit = 2000 # mach 2 for long distance (15km or more)
                 else:
                     args.speed_limit = slimit * randomizer  # return to normal
                 status['message'] += ' {} meters away'.format(distance)
-                sdelay = (old_div(distance, (old_div(args.speed_limit, 3.6))))   # Classic basic physics formula: time = distance divided by velocity (in km/hr), plus a little randomness between 70 and 100% speed.
-                log.debug('{}m for worker to travel at, at a max speed of {} KPH gives us a delay of {}, already waited {}'.format(distance, (args.speed_limit  * randomizer), sdelay, elapsed))
-                sdelay = max((sdelay - elapsed), args.scan_delay)
-                log.debug(sdelay)
+                sdelay = max(((old_div(distance, (old_div(args.speed_limit, 3.6)))) - elapsed), args.scan_delay)   # Classic basic physics formula: time = distance divided by velocity (in km/hr), plus a little randomness between 70 and 100% speed.
+                #log.debug('{}m for worker to travel at, at a max speed of {} KPH gives us a delay of {}, already waited {}'.format(distance, (args.speed_limit  * randomizer), sdelay, elapsed))
                 #if (distance / (elapsed + sdelay)) > (args.speed_limit / 3.6):
                 #    status['message'] = 'Worker {} calculated to travel {}m in {} secs for a speed of {} m/s is much too fast!'.format(account['username'], distance, (elapsed + sdelay), (distance / (elapsed + sdelay)))
                 #    log.warning(status['message'])
@@ -782,6 +708,16 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                 #    query.execute()
                 #    break                    
 
+                # Too late?
+                if leaves and (now() + sdelay) > (leaves - args.min_seconds_left):
+                    # It is slightly silly to put this in status['message'] since it'll be overwritten very shortly after. Oh well.
+                    #No sleep here; we've not done anything worth sleeping for. Plus we clearly need to catch up!
+                    status['message'] = 'Too late for location {:6f},{:6f}; giving up.'.format(next_location[0], next_location[1])
+                    log.info(status['message'])
+                    search_items_queue.task_done()
+                    status['skip'] += 1
+                    continue
+                
                 # Too soon?
                 if appears and (now() + sdelay) < appears:
                     first_loop = True
@@ -796,7 +732,7 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                         if first_loop:
                             log.info(status['message'])
                             first_loop = False
-                        if abs(now() - startwait) > 5000:  # prevents releasing workers early while they wait for locations
+                        if startwait - now() > 5:  # prevents releasing workers early while they wait for locations
                             query = (WorkerStatus
                                      .update(last_modified=datetime.utcnow())
                                      .where(WorkerStatus.username == account['username']))
@@ -805,20 +741,6 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                     if paused:
                         search_items_queue.task_done()
                         continue
-                log.debug('finished early check')
-
-                # Too late?
-                if leaves and (now() + sdelay) > (leaves - args.min_seconds_left):
-                    # It is slightly silly to put this in status['message'] since it'll be overwritten very shortly after. Oh well.
-                    #No sleep here; we've not done anything worth sleeping for. Plus we clearly need to catch up!
-                    status['message'] = 'Too late for location {:6f},{:6f}; giving up.'.format(next_location[0], next_location[1])
-                    log.info(status['message'])
-                    search_items_queue.task_done()
-                    status['skip'] += 1
-                    continue
-                log.debug('finished late check')
-                
-                grabbednew = False
                 step_location = next_location
                 firstrun = False
                 status['message'] += ', sleeping {}s until {}'.format(sdelay, time.strftime('%H:%M:%S', time.localtime(time.time() + sdelay)))
@@ -876,8 +798,8 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                         log.error(status['message'])
                         retries += 1
                         continue  # let's try again!
-                    else:
-                        log.debug("server response: {}".format(response_dict))
+                    #else:
+                        #log.debug("server response: {}".format(response_dict))
 
                     # Got the response, check for captcha, parse it out, then send todo's to db/wh queues.
                     try:
@@ -994,6 +916,9 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                         status['message'] = 'Map parse failed at {:6f},{:6f}, abandoning location. {} may be banned.'.format(step_location[0], step_location[1], account['username'])
                         log.exception(status['message'])
 
+                if response_dict is not None:
+                    del response_dict
+
                 if failed > 0:
                     log.debug('failure detected, retrying')
                     continue
@@ -1087,6 +1012,7 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                             else:
                                 gym_responses[gym['gym_id']] = response['responses']['GET_GYM_DETAILS']
 
+                            del response
                             # Increment which gym we're on. (for status messages)
                             current_gym += 1
 
@@ -1095,6 +1021,7 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
 
                         if gym_responses:
                             parse_gyms(args, gym_responses, whq)
+                            del gym_responses
 
                 # Record the time and place the worker left off at.
                 status['last_scan_time'] = now()
@@ -1166,17 +1093,18 @@ def map_request(args, api, position, key_scheduler, jitter=False):
         cell_ids = util.get_cell_ids(scan_location[0], scan_location[1])
         timestamps = [0, ] * len(cell_ids)
         req = api.create_request()
-        response = req.get_map_objects(latitude=f2i(scan_location[0]),
+        req.get_map_objects(latitude=f2i(scan_location[0]),
                                        longitude=f2i(scan_location[1]),
                                        since_timestamp_ms=timestamps,
                                        cell_id=cell_ids)
-        response = req.check_challenge()
-        response = req.get_hatched_eggs()
-        response = req.get_inventory()
-        response = req.check_awarded_badges()
-        response = req.download_settings()
-        response = req.get_buddy_walked()
+        req.check_challenge()
+        req.get_hatched_eggs()
+        req.get_inventory()
+        req.check_awarded_badges()
+        req.download_settings()
+        req.get_buddy_walked()
         response = req.call()
+        response = clear_dict_response(response, True)
         return response
 
     except Exception as e:
@@ -1192,18 +1120,19 @@ def gym_request(args, api, position, key_scheduler, gym):
     try:
         log.debug('Getting details for gym @ %f/%f (%fkm away)', gym['latitude'], gym['longitude'], calc_distance(position, [gym['latitude'], gym['longitude']]))
         req = api.create_request()
-        x = req.get_gym_details(gym_id=gym['gym_id'],
+        req.get_gym_details(gym_id=gym['gym_id'],
                                 player_latitude=f2i(position[0]),
                                 player_longitude=f2i(position[1]),
                                 gym_latitude=gym['latitude'],
                                 gym_longitude=gym['longitude'])
-        x = req.check_challenge()
-        x = req.get_hatched_eggs()
-        x = req.get_inventory()
-        x = req.check_awarded_badges()
-        x = req.download_settings()
-        x = req.get_buddy_walked()
+        req.check_challenge()
+        req.get_hatched_eggs()
+        req.get_inventory()
+        req.check_awarded_badges()
+        req.download_settings()
+        req.get_buddy_walked()
         x = req.call()
+        x = clear_dict_response(x)
         # Print pretty(x).
         return x
 
@@ -1267,3 +1196,4 @@ def check_speed_limit(kph, previous_location, next_location, last_scan_date):
 
 class TooManyLoginAttempts(Exception):
     pass
+
