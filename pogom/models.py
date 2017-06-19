@@ -989,7 +989,7 @@ class WorkerStatus(BaseModel):
                             'last_modified': datetime.utcnow(),
                             'lat': None,
                             'lon': None,
-                            'last_scan': None,
+                            'last_scan': 0,
                             'flag': 0,
                             'message': 'Unused'
                             }
