@@ -159,6 +159,8 @@ def get_args():
                         required=True)
     parser.add_argument('--skip-empty', help='Enables skipping of empty cells  in normal scans - requires previously populated database (not to be used with -ss)',
                         action='store_true', default=False)
+    parser.add_argument('-inv', '--invert_scans', help='Inverts spawn or stop based scans to only scan locations that do NOT have known spawnpoints.',
+                        action='store_true', default=False)
     parser.add_argument('-C', '--cors', help='Enable CORS on web server.',
                         action='store_true', default=False)
     parser.add_argument('-D', '--db', help='Database filename for SQLite.',
@@ -578,3 +580,20 @@ class Timer():
     def output(self):
         self.checkpoint('end')
         pprint.pprint(self.times)
+
+def clear_dict_response(response, keep_inventory=False):
+    if 'platform_returns' in response:
+        del response['platform_returns']
+    if 'responses' not in response:
+        return response
+    if 'GET_INVENTORY' in response['responses'] and not keep_inventory:
+        del response['responses']['GET_INVENTORY']
+    if 'GET_HATCHED_EGGS' in response['responses']:
+        del response['responses']['GET_HATCHED_EGGS']
+    if 'CHECK_AWARDED_BADGES' in response['responses']:
+        del response['responses']['CHECK_AWARDED_BADGES']
+    if 'DOWNLOAD_SETTINGS' in response['responses']:
+        del response['responses']['DOWNLOAD_SETTINGS']
+    if 'GET_BUDDY_WALKED' in response['responses']:
+        del response['responses']['GET_BUDDY_WALKED']
+    return response
