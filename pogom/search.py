@@ -582,7 +582,37 @@ def generate_hive_locations(args, current_location, step_distance, step_limit, t
     return results
 
 def ringappend(args, loc, results, steps):
-    
+    points = []
+    spawns = []
+    gyms = []
+    stops = []
+    if args.scheduler != 'HexSearch':
+        if config['parse_pokemon']:
+            spawns = Spawnpoints.get_spawnpoints_in_hex(loc, steps)
+            if len(spawns) > 0:
+                points.append(spawns)
+                del spawns
+                #log.debug(len(spawns))  # True number of spawns
+                #log.debug(len(spawns[0]))  # Always 4 (lat/lon/appear/disappear dict)
+                #log.debug(len(points))  # Always 1
+                #log.debug(len(points[0]))  # True number of spawns
+        if args.usestops:
+            gyms = Gym.get_gyms_in_hex(loc, steps)
+            stops = Pokestop.get_stops_in_hex(loc, steps)
+            if len(gyms) > 0:
+                points.append(gyms)
+                del gyms
+            if len(stops) > 0:
+                points.append(stops)
+                del stops
+        
+    if args.scheduler == 'HexSearch':
+        results.append((loc[0], loc[1], 0, len(points)))
+    else:
+        if len(points) > 0:
+            results.append((loc[0], loc[1], 0, len(points[0])))
+
+    return results
 
 
 def search_worker_thread(args, account_failures, search_items_queue, pause_bit, status, dbq, whq, key_scheduler, wid):
