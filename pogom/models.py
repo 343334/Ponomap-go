@@ -24,7 +24,7 @@ from operator import itemgetter
 from . import config
 from .utils import get_pokemon_name, get_pokemon_rarity, get_pokemon_types, get_args, \
      get_move_name, get_move_damage, get_move_energy, get_move_type, date_secs, cur_sec, \
-     now, hoursecs, secs_between, clock_between, equi_rect_distance
+     now, hoursecs, secs_between, clock_between, equi_rect_distance, clear_dict_response
 from .transform import transform_from_wgs_to_gcj, get_new_coords
 from .customLog import printPokemon
 
@@ -534,44 +534,6 @@ class Pokemon(BaseModel):
 
     @classmethod
     def get_spawnpoints_in_hex(cls, center, steps):
-        #log.info('Finding spawn points {} steps away'.format(steps))
-
-        #n, e, s, w = hex_bounds(center, steps)
-
-        #query = (Pokemon
-                 #.select(Pokemon.latitude.alias('lat'),
-                         #Pokemon.longitude.alias('lng'),
-                         #((Pokemon.disappear_time.minute * 60) + Pokemon.disappear_time.second).alias('time'),
-                         #Pokemon.spawnpoint_id
-                         #))
-        #query = (query.where((Pokemon.latitude <= n) &
-                             #(Pokemon.latitude >= s) &
-                             #(Pokemon.longitude >= w) &
-                             #(Pokemon.longitude <= e)
-                             #))
-        #query = query.group_by(Pokemon.spawnpoint_id)
-
-        #s = list(query.dicts())
-
-        # The distance between scan circles of radius 70 in a hex is 121.2436
-        # steps - 1 to account for the center circle then add 70 for the edge.
-        #step_distance = ((steps - 1) * 121.2436) + 70
-        # Compare spawnpoint list to a circle with radius steps * 120.
-        # Uses the direct geopy distance between the center and the spawnpoint.
-        #filtered = []
-
-        #for idx, sp in enumerate(s):
-            #if geopy.distance.distance(center, (sp['lat'], sp['lng'])).meters <= step_distance:
-                #filtered.append(s[idx])
-
-        # At this point, 'time' is DISAPPEARANCE time, we're going to morph it to APPEARANCE time.
-        #for location in filtered:
-            # examples: time    shifted
-            #           0       (   0 + 2700) = 2700 % 3600 = 2700 (0th minute to 45th minute, 15 minutes prior to appearance as time wraps around the hour.)
-            #           1800    (1800 + 2700) = 4500 % 3600 =  900 (30th minute, moved to arrive at 15th minute.)
-            # todo: this DOES NOT ACCOUNT for pokemons that appear sooner and live longer, but you'll _always_ have at least 15 minutes, so it works well enough.
-            #location['time'] = cls.get_spawn_time(location['time'])
-
         return Spawnpoints.get_spawnpoints_in_hex(cls, center, steps)
 
 
@@ -680,8 +642,7 @@ class Pokestop(BaseModel):
 
         s = list(query.dicts())
 
-        radius = 450
-        circle = get_circle(radius, steps)
+        circle = get_circle(450, steps)
         filtered = []
 
         for idx, sp in enumerate(s):
@@ -752,8 +713,7 @@ class Gym(BaseModel):
 
         s = list(query.dicts())
 
-        radius = 450
-        circle = get_circle(radius, steps)
+        circle = get_circle(450, steps)
         filtered = []
 
         for idx, sp in enumerate(s):
@@ -1012,6 +972,7 @@ class WorkerStatus(BaseModel):
                  .select(WorkerStatus.username)
                  .dicts())
         dbacc = [(p['username']) for p in query]
+        del query
 
         insert = []
         for i in accounts:
@@ -1028,12 +989,13 @@ class WorkerStatus(BaseModel):
                             'last_modified': datetime.utcnow(),
                             'lat': None,
                             'lon': None,
-                            'last_scan': now(),
+                            'last_scan': None,
                             'flag': 0,
                             'message': 'Unused'
                             }
                 insert.append(spawninsert)
                 log.info('New worker found, adding {} to db'.format(i['username']))
+        del dbacc
 
         if len(insert) > 0:
             WorkerStatus.insert_many(insert).execute()
@@ -1218,10 +1180,10 @@ class HashKeys(BaseModel):
             HashKeys.insert_many(insert).execute()
 
 
-def hex_bounds(center, steps):
+def hex_bounds(center, steps, dist=0.07):
     # Make a box that is (70m * step_limit * 2) + 70m away from the center point.
     # Rationale is that you need to travel.
-    sp_dist = 0.07 * 2 * steps
+    sp_dist = dist * 2 * steps
     n = get_new_coords(center, sp_dist, 0)[0]
     e = get_new_coords(center, sp_dist, 90)[1]
     s = get_new_coords(center, sp_dist, 180)[0]
@@ -1316,6 +1278,7 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
                 forts = cell.get('forts', [])
             else:
                 forts += cell.get('forts', [])
+    del cells
 
     if pokesfound:
         log.debug('found a pokemon!')
@@ -1479,13 +1442,14 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
                                                  spawn_point_id=p['spawn_point_id'],
                                                  player_latitude=step_location[0],
                                                  player_longitude=step_location[1])
-                encounter_result = req.check_challenge()
-                encounter_result = req.get_hatched_eggs()
-                encounter_result = req.get_inventory()
-                encounter_result = req.check_awarded_badges()
-                encounter_result = req.download_settings()
-                encounter_result = req.get_buddy_walked()
+                req.check_challenge()
+                req.get_hatched_eggs()
+                req.get_inventory()
+                req.check_awarded_badges()
+                req.download_settings()
+                req.get_buddy_walked()
                 encounter_result = req.call()
+                encounter_result = clear_dict_response(encounter_result)
                 hashuse += 1
                 #HashKeys.addone(key)
             if p['pokemon_data']['pokemon_id'] not in args.ignore_list:
@@ -1650,6 +1614,7 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
                     'last_modified': datetime.utcfromtimestamp(
                         f['last_modified_timestamp_ms'] / 1000.0),
                 }
+        del forts
 
     if len(pokemons):
         log.debug('placing pokemon in update queue')
@@ -1828,6 +1793,8 @@ def db_updater(args, q):
                           q.qsize())
                 if q.qsize() > 50:
                     log.warning("DB queue is > 50 (@%d); try increasing --db-threads", q.qsize())
+            del model
+            del data
 
         except Exception as e:
             log.exception('Exception in db_updater: %s', e)
@@ -1955,6 +1922,7 @@ def verify_database_schema(db):
                       db_ver, db_schema_version)
             log.error("Please upgrade your code base or drop all tables in your database.")
             sys.exit(1)
+
         if not args.only_server:
             if len(args.accounts) > 0:
                 WorkerStatus.populate_db(args.accounts)
