@@ -225,37 +225,32 @@ class HexSearch(BaseScheduler):
 class HexSearchSpawnpoint(HexSearch):
 
     def _any_spawnpoints_in_range(self, coords, points, dist):
-        log.debug('coords: {}, points: {}, dist: {}'.format(coords, points, dist))
+        #log.debug('coords: {}, points: {}, dist: {}'.format(coords, points, dist))
         return any(equi_rect_distance(coords, x) <= dist for x in points)
 
     # Extend the generate_locations function to remove locations with no spawnpoints.
     def _generate_locations(self):
         points = set()
-        dist = 70
-        n, e, s, w = hex_bounds(self.scan_location, self.step_limit)
-        log.debug('{}N, {}E, {}S, {}W'.format(n, e, s, w))
 
-        if not self.args.usestops:
+        if not self.args.usestops and not self.args.no_pokemon:
+            dist = 70
+            n, e, s, w = hex_bounds(self.scan_location, self.step_limit)
+            log.debug('70m scan bounds: {}N, {}E, {}S, {}W'.format(n, e, s, w))
             points.update(set((d['latitude'], d['longitude']) for d in Spawnpoints.get_spawnpoints(s, w, n, e)))
 
-        if not points or self.args.usestops:
-            if not points or self.args.no_pokemon:
-                log.warning('No spawnpoints found in the area!  Falling back to pokestops')
-                dist = 450  # This does mean that if you're using stops it'll extend the distance from the last known spawn point to 450m as well as from forts.
+        if len(points) == 0 or self.args.usestops or self.args.no_pokemon:
+            log.warning('No spawnpoints found in the area!  Falling back to forts')
+            dist = 450
+            n, e, s, w = hex_bounds(self.scan_location, self.step_limit, 0.45)
+            log.debug('450m scan bounds: {}N, {}E, {}S, {}W'.format(n, e, s, w))
             log.debug('Checking Stops')
             points.update(set((d['latitude'], d['longitude']) for d in Pokestop.get_stops(s, w, n, e)))
-            #log.debug('Stops type: {} | data: {}'.format(type(stops), stops))
-            log.debug('Now checking gyms')
+            log.debug('Checking gyms')
             points.update(set((d['latitude'], d['longitude']) for d in Gym.get_quick(s, w, n, e)))
-            #log.debug('Gyms type: {} | data: {}'.format(type(gyms), gyms))
-            #if len(stops) > 0:
-                #log.debug('attempt to append stops')
-                #points.update(stops)
-            #if len(gyms) > 0:
-                #log.debug('attempt to append gyms')
-                #points.update(gyms)
             if len(points) == 0:
-                log.warning('No stops either, you need to scan for something first!')
+                log.warning('No forts either, you need to scan for something first!')
+            else:
+                log.debug(points)
 
         # Call the original _generate_locations.
         log.debug('Calling original location generator')
@@ -263,8 +258,12 @@ class HexSearchSpawnpoint(HexSearch):
 
         # Remove items with no spawnpoints in range.
         log.debug('removing individual scan locations with nothing in range')
-        locations = [coords for coords in locations if self._any_spawnpoints_in_range(coords[1], points, dist)]
+        if not self.args.invert_scans:
+            locations = [coords for coords in locations if self._any_spawnpoints_in_range(coords[1], points, dist)]
+        else:
+            locations = [coords for coords in locations if not self._any_spawnpoints_in_range(coords[1], points, dist)]
 
+        del points
         return locations
 
 
@@ -361,6 +360,8 @@ class SpawnScan(BaseScheduler):
         retset = []
         for step, location in enumerate(self.locations, 1):
             retset.append((step, (location['lat'], location['lng'], 40.32), location['appears'], location['leaves']))
+
+        del location
 
         return retset
 
