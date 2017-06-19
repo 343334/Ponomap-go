@@ -590,6 +590,7 @@ def ringappend(args, loc, results, steps):
         if config['parse_pokemon']:
             spawns = Spawnpoints.get_spawnpoints_in_hex(loc, steps)
             if len(spawns) > 0:
+                log.debug(spawns)
                 points.append(spawns)
                 del spawns
                 #log.debug(len(spawns))  # True number of spawns
@@ -598,6 +599,7 @@ def ringappend(args, loc, results, steps):
                 #log.debug(len(points[0]))  # True number of spawns
         if args.usestops:
             gyms = Gym.get_gyms_in_hex(loc, steps)
+            log.debug(gyms)
             stops = Pokestop.get_stops_in_hex(loc, steps)
             if len(gyms) > 0:
                 points.append(gyms)
@@ -610,7 +612,7 @@ def ringappend(args, loc, results, steps):
         results.append((loc[0], loc[1], 0, len(points)))
     else:
         if len(points) > 0:
-            results.append((loc[0], loc[1], 0, len(points[0])))
+            results.append((loc[0], loc[1], 0, len(points)))
 
     return results
 
