@@ -253,6 +253,13 @@ class Pogom(Flask):
                                                                                 request.args.get('spawnpoint_id'),
                                                                                 selected_duration)
 
+        if request.args.get('rsids'):
+            rsids = [str(x) for x in request.args.get('rsids').split(',')]
+            log.debug('Request to remove spawnpoints: {}'.format(rsids))
+            Spawnpoints.delete_spawnpoints(rsids)
+        else:
+            log.debug('No spawnpoint removal requested')
+
         if request.args.get('spawnpoints', 'false') == 'true':
             if lastspawns != 'true':
                 d['spawnpoints'] = Spawnpoints.get_spawnpoints(swLat=swLat, swLng=swLng, neLat=neLat, neLng=neLng)
