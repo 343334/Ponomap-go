@@ -123,9 +123,8 @@ def test(cluster, radius, time_threshold):
         assert cluster.min_time <= p.time <= cluster.max_time
 
 
-def main(raw):
-    radius = 70
-    time_threshold = 240  # 4 minutes is alright to grab a pokemon since most times are 30m+
+def main(raw, radius=70, time_threshold=240):
+    # 4 minutes is alright to grab a pokemon since most times are 30m+
     spawnpoints = [Spawnpoint(x) for x in raw]  # separate them
     clusters = cluster(spawnpoints, radius, time_threshold)
 

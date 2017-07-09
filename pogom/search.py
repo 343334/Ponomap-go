@@ -37,18 +37,21 @@ from datetime import datetime, timedelta
 from dateutils import timezone
 from threading import Thread, Lock
 from queue import Queue, Empty
+from retrying import retry
+from requests.exceptions import ProxyError
 
 from pgoapi import PGoApi
 from pgoapi.utilities import f2i
 from pgoapi import utilities as util
-from pgoapi.exceptions import AuthException
-from pgoapi.hash_server import HashServer
+from pgoapi.exceptions import AuthException, NianticOfflineException, TempHashingBanException, HashingForbiddenException
+from pgoapi.hash_server import HashServer, BadHashRequestException, HashingOfflineException, HashingQuotaExceededException, HashingTimeoutException
 from geopy.distance import vincenty
 
 from . import config
 from .models import parse_map, GymDetails, parse_gyms, MainWorker, WorkerStatus, Spawnpoints, HashKeys, Gym, Pokestop
 from .fakePogoApi import FakePogoApi
-from .utils import now, cur_sec, get_args, equi_rect_distance, clear_dict_response
+from .utils import now, cur_sec, get_args, equi_rect_distance, clear_dict_response, generate_device_info
+from .proxy import get_new_proxy
 from .transform import get_new_coords
 from . import schedulers
 
@@ -293,8 +296,8 @@ def worker_status_db_thread(threads_status, name, db_updates_queue):
                     'method': status['scheduler'],
                     'last_modified': datetime.utcnow()
                 }
-        if overseer is not None:
-            db_updates_queue.put((MainWorker, {0: overseer}))
+        #if overseer is not None:
+            #db_updates_queue.put((MainWorker, {0: overseer}))
             #db_updates_queue.put((WorkerStatus, workers))
         time.sleep(3)
 
@@ -590,7 +593,6 @@ def ringappend(args, loc, results, steps):
         if config['parse_pokemon']:
             spawns = Spawnpoints.get_spawnpoints_in_hex(loc, steps)
             if len(spawns) > 0:
-                log.debug(spawns)
                 points.append(spawns)
                 del spawns
                 #log.debug(len(spawns))  # True number of spawns
@@ -599,7 +601,6 @@ def ringappend(args, loc, results, steps):
                 #log.debug(len(points[0]))  # True number of spawns
         if args.usestops:
             gyms = Gym.get_gyms_in_hex(loc, steps)
-            log.debug(gyms)
             stops = Pokestop.get_stops_in_hex(loc, steps)
             if len(gyms) > 0:
                 points.append(gyms)
@@ -612,7 +613,7 @@ def ringappend(args, loc, results, steps):
         results.append((loc[0], loc[1], 0, len(points)))
     else:
         if len(points) > 0:
-            results.append((loc[0], loc[1], 0, len(points)))
+            results.append((loc[0], loc[1], 0, len(points[0])))
 
     return results
 
@@ -620,8 +621,21 @@ def ringappend(args, loc, results, steps):
 def search_worker_thread(args, account_failures, search_items_queue, pause_bit, status, dbq, whq, key_scheduler, wid):
     step_location = []
     log.debug('Search worker thread starting')
+    # New lease of life right here.
+    status['fail'] = 0
+    status['success'] = 0
+    status['noitems'] = 0
+    status['skip'] = 0
+    status['captcha'] = 0
+    status['hashuse'] = 0
+    status['retries'] = 0
     status['csolved'] = 0
     slimit = args.speed_limit
+    loginDelayLock.acquire()
+    delay = (args.login_delay) + (old_div((random.random() - .5), 2))
+    status['message'] = 'Delaying thread startup for ' + str(delay) + ' seconds'
+    time.sleep(delay)
+    loginDelayLock.release()
     firstrun = True
 
     # The outer forever loop restarts only when the inner one is intentionally exited - which should only be done when the worker is failing too often, and probably banned.
@@ -637,16 +651,12 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                 step, next_location, appears, leaves = search_items_queue.get()
                 status['lat'], status['lon'], status['alt'] = next_location
                 # Delay each thread start time so that logins occur after delay.
-                loginDelayLock.acquire()
-                delay = (args.login_delay) + (old_div((random.random() - .5), 2))
-                status['message'] = 'Delaying thread startup for ' + str(delay) + ' seconds'
-                time.sleep(delay)
-                loginDelayLock.release()
             status['message'] = 'Getting closest worker'
             account = WorkerStatus.get_closest_available(next_location[0], next_location[1], wid)
             status['starttime'] = now()
-            if not account['lat']:
-                account['lat'], account['lon'] = next_location
+            if account['lat'] is None:
+                log.debug("account doesn't have previous location")
+                account['lat'], account['lon'] = next_location[0], next_location[1]
             step_location = account['lat'], account['lon']
             status['message'] = 'Switching to account {}'.format(account['username'])
             log.debug('current time: {}'.format(now()))
@@ -654,18 +664,11 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
             status['pass'] = account['pass']
             log.info(status['message'])
 
-            # New lease of life right here.
-            status['fail'] = 0
-            status['success'] = 0
-            status['noitems'] = 0
-            status['skip'] = 0
-            status['captcha'] = 0
             status['location'] = False
             if not account['last_scan']:
                 account['last_scan'] = now()
             status['last_scan_time'] = account['last_scan']
-            status['hashuse'] = 0
-            status['retries'] = 0
+            account['last_timestamp_ms'] = 0
 
             # Only sleep when consecutive_fails reaches max_failures, overall fails for stat purposes.
             consecutive_fails = 0
@@ -673,17 +676,11 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
             consecutive_blind = 0
 
             # Create the API instance this will use.
-            if args.mock != '':
-                api = FakePogoApi(args.mock)
-            else:
-                api = PGoApi()
-
-            if status['proxy_url']:
-                log.debug("Using proxy %s", status['proxy_url'])
-                api.set_proxy({'http': status['proxy_url'], 'https': status['proxy_url']})
+            api = setup_api(args, status, account)
 
             # The forever loop for the searches.
             log.debug('starting search loop')
+            logged_in = False
             
             while True:
                 # If this account has been messing up too hard, let it rest.
@@ -713,9 +710,10 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                         query.execute()
                         break
 
-                #if not firstrun:
-                step, next_location, appears, leaves = search_items_queue.get()
+                if not firstrun:
+                    step, next_location, appears, leaves = search_items_queue.get()
                 status['message'] = 'Got new search item'
+                firstrun = False
 
                 paused = False
                 
@@ -730,6 +728,8 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                     args.speed_limit = slimit * randomizer  # return to normal
                 status['message'] += ' {} meters away'.format(distance)
                 sdelay = max(((old_div(distance, (old_div(args.speed_limit, 3.6)))) - elapsed), args.scan_delay)   # Classic basic physics formula: time = distance divided by velocity (in km/hr), plus a little randomness between 70 and 100% speed.
+                #sdelay = max(((old_div(distance, (old_div(args.speed_limit, 3.6)))) - elapsed), 0.1)
+                
                 #log.debug('{}m for worker to travel at, at a max speed of {} KPH gives us a delay of {}, already waited {}'.format(distance, (args.speed_limit  * randomizer), sdelay, elapsed))
                 #if (distance / (elapsed + sdelay)) > (args.speed_limit / 3.6):
                 #    status['message'] = 'Worker {} calculated to travel {}m in {} secs for a speed of {} m/s is much too fast!'.format(account['username'], distance, (elapsed + sdelay), (distance / (elapsed + sdelay)))
@@ -764,17 +764,15 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                         if first_loop:
                             log.info(status['message'])
                             first_loop = False
-                        if startwait - now() > 5:  # prevents releasing workers early while they wait for locations
-                            query = (WorkerStatus
-                                     .update(last_modified=datetime.utcnow())
-                                     .where(WorkerStatus.username == account['username']))
-                            query.execute()
-                        time.sleep(1)
+                        query = (WorkerStatus
+                                 .update(last_modified=datetime.utcnow())
+                                 .where(WorkerStatus.username == account['username']))
+                        query.execute()
+                        time.sleep(5)
                     if paused:
                         search_items_queue.task_done()
                         continue
                 step_location = next_location
-                firstrun = False
                 status['message'] += ', sleeping {}s until {}'.format(sdelay, time.strftime('%H:%M:%S', time.localtime(time.time() + sdelay)))
                 log.info(status['message'])
                 time.sleep(sdelay)
@@ -784,13 +782,15 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                 # when the auth token is refreshed.
                 api.set_position(*step_location)
 
-                if args.hash_key:
-                    key = next(key_scheduler)
-                    log.debug('Using key {} for this scan.'.format(key))
-                    api.activate_hash_server(key)
-
                 # Ok, let's get started -- check our login status.
-                check_login(args, account, api, step_location, status['proxy_url'])
+                status['message'] = "Logging in..."
+                try:
+                    check_login_new(args, account, api, key_scheduler, step_location, status['proxy_url'])
+                except TooManyLoginAttempts as e:
+                    status['message'] = 'Login failed: {}'.format(e)
+                    raise TooManyLoginAttempts(status['message'])
+                except Exception as e:
+                    raise Exception(e)
 
                 # Putting this message after the check_login so the messages aren't out of order.
                 status['message'] = 'Searching at {:6f},{:6f}'.format(step_location[0], step_location[1])
@@ -800,7 +800,8 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                 retries = 0  # reset the retry counter
                 while retries <= args.scan_retries:
                     if retries > 0:
-                        log.debug('retrying scan {},'.format(retries))
+                        status['message'] = 'Retrying scan #{}'.format(retries)
+                        log.debug(status['message'])
                         status['retries'] += 1
                         if retries == args.scan_retries:
                             log.debug('last attempt')
@@ -809,9 +810,15 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                         break
                     time.sleep(args.scan_delay * retries)
                     spawns = Spawnpoints.get_spawnpoint_ids(step_location)
-                    
+
+                    if args.hash_key and retries > 0:  # Set our hash key
+                        key = next(key_scheduler)
+                        log.debug('Using key {} for this scan.'.format(key))
+                        api.activate_hash_server(key)
+
                     # Make the actual request. (finally!)
-                    response_dict = map_request(args, api, step_location, key_scheduler, args.jitter)
+                    response_dict = map_request(args, account, api, step_location, key_scheduler, args.jitter)
+
                     status['lastscan'] = now()
                     status['hashuse'] += 1
                     # Only update the database once we've actually made the request.
@@ -837,6 +844,7 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                     try:
                         # Captcha check
                         if args.captcha_solving:
+                            #check_captcha(args, response_dict, status, 
                             if 'CHECK_CHALLENGE' in response_dict['responses']:
                                 captcha_url = response_dict['responses']['CHECK_CHALLENGE']['challenge_url']
                                 if len(captcha_url) > 1:
@@ -863,7 +871,7 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                                             status['csolved'] += 1
                                             log.info(status['message'])
                                             # Make another request for the same coordinate since the previous one was captcha'd
-                                            response_dict = map_request(args, api, step_location, key_scheduler, args.jitter)
+                                            response_dict = map_request(args, account, api, step_location, key_scheduler, args.jitter)
                                         else:
                                             status['message'] = "Account {} failed verifyChallenge, putting away account for now".format(account['username'])
                                             log.info(status['message'])
@@ -877,14 +885,14 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                                             break
                             else:
                                 query = (WorkerStatus
-                                         .update(flag=5, last_modified=datetime.utcnow(), worker_name='', message='CHECK_CHALLENGE failed, banned account')
+                                         .update(flag=4, last_modified=datetime.utcnow(), worker_name='', message='CHECK_CHALLENGE failed, possible exception')
                                          .where(WorkerStatus.username == account['username']))
                                 query.execute()
                                 failed += 1
                                 log.debug('failure due to CHECK_CHALLENGE')
                                 break
 
-                        parsed = parse_map(args, response_dict, step_location, dbq, whq, api, spawns, key_scheduler)
+                        parsed = parse_map(args, response_dict, step_location, dbq, whq, api, spawns, key_scheduler, account)
                         status['hashuse'] += parsed['hashuses']
                         if parsed['blind'] > 0 and not config['parse_pokemon']:
                             status['message'] = 'No rares detected, possibly blinded account'
@@ -944,7 +952,7 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                         failed += 1
                         log.debug('failure due to map exception')
                         status['fail'] += 1
-                        consecutive_fails += 1  # wthese aren't in an if statement, because parsing failures need to be handled differently.
+                        consecutive_fails += 1  # these aren't in an if statement, because parsing failures need to be handled differently.
                         status['message'] = 'Map parse failed at {:6f},{:6f}, abandoning location. {} may be banned.'.format(step_location[0], step_location[1], account['username'])
                         log.exception(status['message'])
 
@@ -986,6 +994,12 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                     hashkeys[key] = key_instance
                     hashkeys[key]['key'] = key
                     dbq.put((HashKeys, hashkeys))
+
+                if account['level'] > 0:
+                    query = (WorkerStatus
+                             .update(level=account['level'], last_modified=datetime.utcnow())
+                             .where(WorkerStatus.username == account['username']))
+                    query.execute()
 
                 consecutive_fails = 0
                 status['message'] = 'Search at {:6f},{:6f} completed with {} finds; '.format(step_location[0], step_location[1], parsed['count'])
@@ -1034,15 +1048,15 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                         for gym in list(gyms_to_update.values()):
                             status['message'] = 'Getting details for gym {} of {} for location {},{}...'.format(current_gym, len(gyms_to_update), step_location[0], step_location[1])
                             log.debug(status['message'])
-                            time.sleep(random.random() + 2)
-                            response = gym_request(args, api, step_location, key_scheduler, gym)
+                            time.sleep(random.random() + 5)
+                            response = gym_request(args, account, api, step_location, key_scheduler, gym)
                             status['hashuse'] += 1
 
                             # Make sure the gym was in range. (sometimes the API gets cranky about gyms that are ALMOST 1km away)
-                            if response['responses']['GET_GYM_DETAILS']['result'] == 2:
+                            if response['responses']['GYM_GET_INFO']['result'] == 2:
                                 log.warning('Gym @ %f/%f is out of range (%dkm), skipping', gym['latitude'], gym['longitude'], distance)
                             else:
-                                gym_responses[gym['gym_id']] = response['responses']['GET_GYM_DETAILS']
+                                gym_responses[gym['gym_id']] = response['responses']['GYM_GET_INFO']
 
                             del response
                             # Increment which gym we're on. (for status messages)
@@ -1058,6 +1072,12 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
                 # Record the time and place the worker left off at.
                 status['last_scan_time'] = now()
                 status['location'] = step_location
+                #account_failures.append({'account': account, 'last_fail_time': now(), 'reason': 'rest interval'})
+                #query = (WorkerStatus
+                #         .update(flag=3, last_modified=datetime.utcnow(), worker_name='')
+                #         .where(WorkerStatus.username == account['username']))
+                #query.execute()
+                #break
 
                 # Always delay the desired amount after "scan" completion.
                 #status['message'] += ', sleeping {}s until {}'.format(args.scan_delay, time.strftime('%H:%M:%S', time.localtime(time.time() + args.scan_delay)))
@@ -1065,53 +1085,454 @@ def search_worker_thread(args, account_failures, search_items_queue, pause_bit, 
 
         # Catch any process exceptions, log them, and continue the thread.
         except Exception as e:
-            #status['message'] = 'Exception in search_worker using account {}. Restarting with fresh account. See logs for details.'.format(account['username'])
+            if str(e).find("Banned, kill me") > -1:
+                account_failures.append({'account': account, 'last_fail_time': now(), 'reason': 'banned'})
+                query = (WorkerStatus
+                         .update(flag=5, last_modified=datetime.utcnow(), worker_name='', message=e)
+                         .where(WorkerStatus.username == account['username']))
+                query.execute()
+            else:
+                account_failures.append({'account': account, 'last_fail_time': now(), 'reason': 'exception'})
+                query = (WorkerStatus
+                         .update(flag=4, last_modified=datetime.utcnow(), message=e)
+                         .where(WorkerStatus.username == account['username']))
+                query.execute()
+            status['message'] = 'Exception in search_worker. Exception message: {}'.format(e)
             #
             #log.error('Exception in search_worker under account {} Exception message: {}'.format(account['username'], e))
-            log.error('Exception in search_worker. Exception message: {}'.format(e))
-            #account_failures.append({'account': account, 'last_fail_time': now(), 'reason': 'exception'})
-            #query = (WorkerStatus
-            #         .update(flag=4, last_modified=datetime.utcnow())
-            #         .where(WorkerStatus.username == account['username']))
-            #query.execute()
+            log.error(status['message'])
+            
             time.sleep(args.scan_delay)
 
 
-def check_login(args, account, api, position, proxy_url):
+def api_call(args, api, account, key_scheduler, request, chain=True, stamp=True, buddy=True, settings=False, inbox=True, dl_hash=True, action=None):
+    key = next(key_scheduler)
+    log.debug('Using key {} for this scan.'.format(key))
+    api.activate_hash_server(key)
+    log.debug('Attempting API call')
+    if chain:
+        request.check_challenge()
+        request.get_hatched_eggs()
+        if stamp:
+            request.get_inventory(last_timestamp_ms=account['last_timestamp_ms']) ###
+        else:
+            request.get_inventory(last_timestamp_ms=0)
+        request.check_awarded_badges()
+        if settings:
+            if dl_hash:
+                request.download_settings(hash=account['remote_config']['hash']) ###
+            else:
+                request.download_settings()
+        if buddy:
+            request.get_buddy_walked()
+        if inbox:
+            request.get_inbox(is_history=True)
+
+    if action:
+        if account['last_scan'] > now() + 0.5:
+            time.sleep(account['last_scan'] - now())
+        else:
+            time.sleep(0.5)
+
+    #log.debug('attempting call')
+    #responses = request.call()
+    #log.debug('call completed')
+    #account['last_request'] = now()
+
+    attempt = 0
+    while attempt < args.scan_retries or 'responses' not in locals():
+        attempt = 0  # get the damn response!
+        try:
+            log.debug('attempting call')
+            responses = request.call()
+            log.debug('call completed')
+            account['last_request'] = now()
+            if 'status_code' in responses:
+                if responses['status_code'] == 3:
+                    raise Exception("Banned, kill me. Status code {}".format(responses['status_code']))
+            if settings:
+                if 'responses' in locals():
+                    if 'hash' not in responses['responses']['DOWNLOAD_SETTINGS']:
+                        continue
+            time.sleep(1)
+        except HashingQuotaExceededException:
+            key = next(key_scheduler)
+            err = "Current key limit reached, switching keys."
+            time.sleep(5)
+            attempt += 1
+        except BadHashRequestException:
+            err = "Hashing status 400 error"
+            time.sleep(1)
+        except HashingOfflineException:
+            err = "Hashing server offline"
+            time.sleep(1)
+        except HashingTimeoutException:
+            err = "Hashing server timeout"
+            time.sleep(1)
+        except NianticOfflineException:
+            err = "Niantic offline/proxy error"
+            time.sleep(5)
+            attempt += 1
+        except HashingForbiddenException:
+            err = "Hashing server error 403"
+            time.sleep(5)
+        except TempHashingBanException:
+            err = "Hashing server temp ban, sleeping for 4 minutes"
+            time.sleep(240)
+        except KeyError as e:
+            err = "Couldn't get full dict: {}".format(e)
+            time.sleep(5)
+            attempt += 1
+        except Exception as e:
+            err = "General exception: {}".format(e)
+            raise Exception(err)
+        else:
+            if 'err' in locals():
+                del err
+            break
+        finally:
+            if 'err' in locals():
+                log.error(err)
+
+    if action:
+        account['last_scan'] = account['last_request'] + action
+
+    try:
+        parse_new_timestamp_ms(account, responses)
+    except KeyError:
+        err = "Parse_new_timestamp_ms error!"
+        pass
+
+    if settings:
+        #if 'responses' not in locals() or 'hash' not in responses['responses']['DOWNLOAD_SETTINGS']:
+            #raise Exception("Response incomplete")
+        try:
+            log.debug("Going to parse_download_settings")
+            parse_download_settings(account, responses)
+            log.debug("parse_download_settings complete")
+        except KeyError as e:
+            err = "Missing download_settings response: {}".format(e)
+
+    if attempt > args.scan_retries:
+        err = "Exceeded API call retries"
+
+    if 'err' in locals():
+        log.error(err)
+        raise Exception(err)
+
+    #if action:
+        #account['last_scan'] = account['last_request'] + action
+
+    #try:
+    #    parse_new_timestamp_ms(account, responses)
+    #except KeyError:
+    #    log.error("Parse_new_timestamp_ms error!")
+    #    pass
+
+    #if settings:
+        #try:
+            #parse_download_settings(account, responses)
+        #except KeyError:
+            #log.error("Missing download_settings response")
+
+    return responses
+
+
+# Use API to check the login status, and retry the login if possible.
+def check_login_new(args, account, api, key_scheduler, position, proxy_url):
+    total_req = 0
+    app_version = int(args.api_version.replace('.', '0'))
 
     # Logged in? Enough time left? Cool!
     if api._auth_provider and api._auth_provider._ticket_expire:
-        remaining_time = old_div(api._auth_provider._ticket_expire, 1000) - time.time()
+        remaining_time = api._auth_provider._ticket_expire / 1000 - time.time()
         if remaining_time > 60:
-            log.debug('Credentials remain valid for another %f seconds', remaining_time)
+            log.debug(
+                'Credentials remain valid for another %f seconds.',
+                remaining_time)
             return
 
-    # Try to login. (a few times, but don't get stuck here)
-    i = 0
-    while i < args.login_retries:
+    # Try to login. Repeat a few times, but don't get stuck here.
+    num_tries = 0
+    
+    # One initial try + login_retries.
+    while num_tries < (args.login_retries + 1):
         try:
             if proxy_url:
-                api.set_authentication(provider=account['auth_service'], username=account['username'], password=account['pword'], proxy_config={'http': proxy_url, 'https': proxy_url})
+                api.set_authentication(
+                    provider=account['auth_service'],
+                    username=account['username'],
+                    password=account['pword'],
+                    proxy_config={'http': proxy_url, 'https': proxy_url})
             else:
-                api.set_authentication(provider=account['auth_service'], username=account['username'], password=account['pword'])
+                api.set_authentication(
+                    provider=account['auth_service'],
+                    username=account['username'],
+                    password=account['pword'])
             break
         except AuthException:
-            if i >= args.login_retries:
-                raise TooManyLoginAttempts('Exceeded login attempts')
+            num_tries += 1
+            log.error(
+                ('Failed to login to Pokemon Go with account %s. ' +
+                 'Trying again in %g seconds.'),
+                account['username'], args.login_delay)
+            time.sleep(args.login_delay)
+
+    if num_tries > args.login_retries:
+        log.error(
+            ('Failed to login to Pokemon Go with account %s in ' +
+             '%d tries. Giving up.'),
+            account['username'], num_tries)
+        raise TooManyLoginAttempts('Exceeded login attempts.')
+
+    time.sleep(random.uniform(2, 4))
+
+    try:  # 1 - Make an empty request to mimick real app behavior.
+        request = api.create_request()
+        log.debug("empty request")
+        api_call(args, api, account, key_scheduler, request, chain=False)
+        total_req += 1
+        time.sleep(random.uniform(.43, .97))
+    except Exception as e:
+        log.exception('Login for account %s failed.' +
+                      ' Exception in call request: %s', account['username'],
+                      repr(e))
+        return False
+
+    try:  # 2 - Get Player request.
+        req = api.create_request()
+        log.debug("Get_player request")
+        req.get_player(
+            player_locale={
+                'country': 'US',
+                'language': 'en',
+                'timezone': 'America/Denver'})
+        api_call(args, api, account, key_scheduler, req, chain=False)
+        total_req += 1
+        time.sleep(random.uniform(.53, 1.1))
+    except Exception as e:
+        log.exception('Login for account %s failed. Exception in ' +
+                      'Get Player request: %s', account['username'], repr(e))
+        return False
+
+    try:  # 3 - Download Remote Config Version request.
+        old_config = account.get('remote_config', {})
+        request = api.create_request()
+        log.debug("Download remote config version")
+        request.download_remote_config_version(platform=1,
+                                               app_version=app_version)
+        response = api_call(args, api, account, key_scheduler, request, stamp=False, buddy=False, settings=True, inbox=False, dl_hash=False)
+
+        total_req += 1
+        time.sleep(random.uniform(.53, 1.1))
+    except Exception as e:
+        log.exception('Error while downloading remote config: %s.', repr(e))
+        return False
+
+    # 4 - Get Asset Digest request.
+    log.debug("setting up remote_config")
+    config = account.get('remote_config', {})
+    
+    if config.get('asset_time', 0) > old_config.get('asset_time', 0):
+        i = random.randint(0, 3)
+        req_count = 0
+        result = 2
+        page_offset = 0
+        page_timestamp = 0
+        
+        time.sleep(random.uniform(.7, 1.2))
+        
+        while result == 2:
+            try:
+                request = api.create_request()
+                request.get_asset_digest(
+                    platform=1,
+                    app_version=app_version,
+                    paginate=True,
+                    page_offset=page_offset,
+                    page_timestamp=page_timestamp)
+                log.debug("Getting asset digest")
+                response = api_call(args, api, account, key_scheduler, request, buddy=False, settings=True)
+                
+                req_count += 1
+                total_req += 1
+                
+                if i > 2:
+                    time.sleep(random.uniform(1.4, 1.6))
+                    i = 0
+                else:
+                    i += 1
+                    time.sleep(random.uniform(.3, .5))
+
+                try:
+                    result = response['responses']['GET_ASSET_DIGEST']
+                except KeyError:
+    
+                    break
+
+                result = response.get('result', 0)
+                page_offset = response.get('page_offset', 0)
+                page_timestamp = response.get('timestamp_ms', 0)
+                log.debug('Completed %d requests to get asset digest.',
+                          req_count)
+
+            except Exception as e:
+                log.exception('Error while downloading Asset Digest: %s.',
+                              repr(e))
+                return False
+
+    # 5 - Download Item Templates request.
+    if config.get('template_time', 0) > old_config.get('template_time', 0):
+        i = random.randint(0, 3)
+        req_count = 0
+        result = 2
+        page_offset = 0
+        page_timestamp = 0
+
+        while result == 2:
+            request = api.create_request()
+            request.download_item_templates(paginate=True,
+                                            page_offset=page_offset,
+                                            page_timestamp=page_timestamp)
+            log.debug("download item templates")
+            api_call(args, api, account, key_scheduler, request, buddy=False, settings=True)
+            
+            req_count += 1
+            total_req += 1
+            
+            if i > 2:
+                time.sleep(random.uniform(1.4, 1.6))
+                i = 0
             else:
                 i += 1
-                #log.error('Failed to login to Pokemon Go with account %s. Trying again in %g seconds', account['username'], args.login_delay)
-                time.sleep(args.login_delay)
+                time.sleep(random.uniform(.25, .5))
 
-    log.debug('Login for account %s successful', account['username'])
-    time.sleep(20)
+            try:
+                result = response['responses']['DOWNLOAD_ITEM_TEMPLATES']
+            except KeyError:
+                break
+
+            result = response.get('result', 0)
+            page_offset = response.get('page_offset', 0)
+            page_timestamp = response.get('timestamp_ms', 0)
+            log.debug('Completed %d requests to download'
+                      + ' item templates.', req_count)
 
 
-def map_request(args, api, position, key_scheduler, jitter=False):
-    if args.hash_key:
-        key = next(key_scheduler)
-        log.debug('Using key {} for this scan.'.format(key))
-        api.activate_hash_server(key)
+    try:
+        request = api.create_request()
+        log.debug("get player profile")
+        request.get_player_profile()
+        response = api_call(args, api, account, key_scheduler, request, settings=True, inbox=False)
+
+        total_req += 1
+        time.sleep(random.uniform(.2, .3))
+    except Exception as e:
+        log.exception('Login for account %s failed. Exception occurred ' +
+                      'while fetching player profile: %s.',
+                      account['username'],
+                      e)
+        raise LoginSequenceFail('Failed while getting player profile in'
+                                + ' login sequence for account %s.',
+                                account['username'])
+
+    # Needs updated PGoApi to be used.
+    # log.debug('Retrieving Store Items...')
+    # try:  # 7 - Make an empty request to retrieve store items.
+    #    request = api.create_request()
+    #    request.get_store_items()
+    #    response = request.call()
+    #    total_req += 1
+    #    time.sleep(random.uniform(.6, 1.1))
+    # except Exception as e:
+    #    log.exception('Login for account %s failed. Exception in ' +
+    #                  'retrieving Store Items: %s.', account['username'],
+    #                  e)
+    #    raise LoginSequenceFail('Failed during login sequence.')
+
+    # 8 - Check if there are level up rewards to claim.
+    log.debug('Checking if there are level up rewards to claim...')
+
+    try:
+        request = api.create_request()
+        request.level_up_rewards(level=account['level'])
+        log.debug("Getting level up rewards for level {}".format(account['level']))
+        response = api_call(args, api, account, key_scheduler, request, settings=True)
+
+        total_req += 1
+        time.sleep(random.uniform(.45, .7))
+    except Exception as e:
+        log.exception('Login for account %s failed. Exception occurred ' +
+                      'while fetching level-up rewards: %s.',
+                      account['username'],
+                      e)
+        raise LoginSequenceFail('Failed while getting level-up rewards in'
+                                + ' login sequence for account %s.',
+                                account['username'])
+
+    log.info('RPC login sequence for account %s successful with %s requests.',
+             account['username'],
+             total_req)
+
+    time.sleep(random.uniform(10, 20))
+
+
+def parse_download_settings(account, api_response):
+    log.debug("parsing download settings")
+    if 'DOWNLOAD_REMOTE_CONFIG_VERSION' in api_response['responses']:
+        remote_config = (api_response['responses']
+                         .get('DOWNLOAD_REMOTE_CONFIG_VERSION', 0))
+        if 'asset_digest_timestamp_ms' in remote_config:
+            asset_time = remote_config['asset_digest_timestamp_ms'] / 1000000
+        if 'item_templates_timestamp_ms' in remote_config:
+            template_time = remote_config['item_templates_timestamp_ms'] / 1000
+
+        download_settings = {}
+        log.debug("here come da hash")
+        download_settings['hash'] = api_response[
+            'responses']['DOWNLOAD_SETTINGS']['hash']
+        download_settings['asset_time'] = asset_time
+        download_settings['template_time'] = template_time
+        log.debug("got all assets")
+
+        account['remote_config'] = download_settings
+
+        log.debug('Download settings for account %s: %s.',
+                  account['username'],
+                  download_settings)
+        return True
+
+
+# Parse new timestamp from the GET_INVENTORY response.
+def parse_new_timestamp_ms(account, api_response):
+    if 'GET_INVENTORY' in api_response['responses']:
+        account['last_timestamp_ms'] = (api_response['responses']
+                                                    ['GET_INVENTORY']
+                                                    ['inventory_delta']
+                                        .get('new_timestamp_ms', 0))
+
+        player_level = get_player_level(api_response)
+        if player_level:
+            account['level'] = player_level
+
+def get_player_level(map_dict):
+    inventory_items = map_dict['responses'].get(
+        'GET_INVENTORY', {}).get(
+        'inventory_delta', {}).get(
+        'inventory_items', [])
+    player_stats = [item['inventory_item_data']['player_stats']
+                    for item in inventory_items
+                    if 'player_stats' in item.get(
+                    'inventory_item_data', {})]
+    if len(player_stats) > 0:
+        player_level = player_stats[0].get('level', 1)
+        
+        return player_level
+
+    return 0
+
+
+def map_request(args, account, api, position, key_scheduler, jitter=False):
     # Create scan_location to send to the api based off of position, because tuples aren't mutable.
     if jitter:
         # Jitter it, just a little bit.
@@ -1121,56 +1542,31 @@ def map_request(args, api, position, key_scheduler, jitter=False):
         # Just use the original coordinates.
         scan_location = position
 
-    try:
-        cell_ids = util.get_cell_ids(scan_location[0], scan_location[1])
-        timestamps = [0, ] * len(cell_ids)
-        req = api.create_request()
-        req.get_map_objects(latitude=f2i(scan_location[0]),
-                                       longitude=f2i(scan_location[1]),
-                                       since_timestamp_ms=timestamps,
-                                       cell_id=cell_ids)
-        req.check_challenge()
-        req.get_hatched_eggs()
-        req.get_inventory()
-        req.check_awarded_badges()
-        req.download_settings()
-        req.get_buddy_walked()
-        response = req.call()
-        response = clear_dict_response(response, True)
-        return response
-
-    except Exception as e:
-        log.warning('Exception while downloading map: %s', e)
-        return False
+    cell_ids = util.get_cell_ids(scan_location[0], scan_location[1])
+    timestamps = [0, ] * len(cell_ids)
+    req = api.create_request()
+    req.get_map_objects(latitude=f2i(scan_location[0]),
+                         longitude=f2i(scan_location[1]),
+                         since_timestamp_ms=timestamps,
+                         cell_id=cell_ids)
+    response = api_call(args, api, account, key_scheduler, req)  # perform the call
+    #response = clear_dict_response(response, True)
+    return response
 
 
-def gym_request(args, api, position, key_scheduler, gym):
-    if args.hash_key:
-        key = next(key_scheduler)
-        log.debug('Using key {} for this scan.'.format(key))
-        api.activate_hash_server(key)
-    try:
-        log.debug('Getting details for gym @ %f/%f (%fkm away)', gym['latitude'], gym['longitude'], calc_distance(position, [gym['latitude'], gym['longitude']]))
-        req = api.create_request()
-        req.get_gym_details(gym_id=gym['gym_id'],
-                                player_latitude=f2i(position[0]),
-                                player_longitude=f2i(position[1]),
-                                gym_latitude=gym['latitude'],
-                                gym_longitude=gym['longitude'])
-        req.check_challenge()
-        req.get_hatched_eggs()
-        req.get_inventory()
-        req.check_awarded_badges()
-        req.download_settings()
-        req.get_buddy_walked()
-        x = req.call()
-        x = clear_dict_response(x)
-        # Print pretty(x).
-        return x
-
-    except Exception as e:
-        log.warning('Exception while downloading gym details: %s', e)
-        return False
+def gym_request(args, account, api, position, key_scheduler, gym):
+    log.debug('Getting details for gym @ %f/%f (%fkm away)', gym['latitude'], gym['longitude'], calc_distance(position, [gym['latitude'], gym['longitude']]))
+    req = api.create_request()
+    req.gym_get_info(
+        gym_id=gym['gym_id'],
+        player_lat_degrees=f2i(position[0]),
+        player_lng_degrees=f2i(position[1]),
+        gym_lat_degrees=gym['latitude'],
+        gym_lng_degrees=gym['longitude'])
+    response = api_call(args, api, account, key_scheduler, req)
+    #response = clear_dict_response(response)
+    # Print pretty(x).
+    return response
 
 
 def token_request(args, status, url):
@@ -1229,3 +1625,37 @@ def check_speed_limit(kph, previous_location, next_location, last_scan_date):
 class TooManyLoginAttempts(Exception):
     pass
 
+class LoginSequenceFail(Exception):
+    pass
+
+# Create the API object that'll be used to scan.
+def setup_api(args, status, account):
+    # Create the API instance this will use.
+    if args.mock != '':
+        api = FakePogoApi(args.mock)
+    else:
+        identifier = account['username'] + account['pword']
+        device_info = generate_device_info(identifier)
+        api = PGoApi(device_info=device_info)
+
+    # New account - new proxy.
+    if args.proxy:
+        # If proxy is not assigned yet or if proxy-rotation is defined
+        # - query for new proxy.
+        if ((not status['proxy_url']) or
+                ((args.proxy_rotation is not None) and
+                 (args.proxy_rotation != 'none'))):
+
+            proxy_num, status['proxy_url'] = get_new_proxy(args)
+            if args.proxy_display.upper() != 'FULL':
+                status['proxy_display'] = proxy_num
+            else:
+                status['proxy_display'] = status['proxy_url']
+
+    if status['proxy_url']:
+        log.debug('Using proxy %s', status['proxy_url'])
+        api.set_proxy({
+            'http': status['proxy_url'],
+            'https': status['proxy_url']})
+
+    return api

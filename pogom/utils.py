@@ -4,13 +4,18 @@
 import sys
 import configargparse
 import os
+import math
 import json
 import logging
-import shutil
-import pprint
+import random
 import time
-import math
-import re
+import socket
+import struct
+import zipfile
+import requests
+import hashlib
+
+from s2sphere import CellId, LatLng
 
 from . import config
 #from .models import WorkerStatus
@@ -65,6 +70,7 @@ def get_args():
                         help='Seconds for accounts to search before switching to a new account. 0 to disable.')
     parser.add_argument('-ari', '--account-rest-interval', type=int, default=7200,
                         help='Seconds for accounts to rest when they fail or are switched out.')
+    parser.add_argument('--api-version', default='0.67.1', help=('API version currently in use.'))
     parser.add_argument('-ac', '--accountcsv',
                         help='Load accounts from CSV file containing "auth_service,username,passwd" lines.')
     parser.add_argument('-bh', '--beehive',
@@ -201,9 +207,16 @@ def get_args():
     parser.add_argument('-sl', '--speed_limit',
                         help='Set a maximum speed in km/hour for scanner movement.', type=int, default=32)
     parser.add_argument('-px', '--proxy', help='Proxy url (e.g. socks5://127.0.0.1:9050).', action='append')
+    parser.add_argument('-pxo', '--proxy-rotation',
+                        help=('Enable proxy rotation with account changing ' +
+                              'for search threads (none/round/random).'),
+                        type=str, default='none')
     parser.add_argument('-pxsc', '--proxy-skip-check', help='Disable checking of proxies before start.', action='store_true', default=False)
     parser.add_argument('-pxt', '--proxy-timeout', help='Timeout settings for proxy checker in seconds.', type=int, default=5)
     parser.add_argument('-pxd', '--proxy-display', help='Display info on which proxy beeing used (index or full) To be used with -ps.', type=str, default='index')
+    parser.add_argument('-pxf', '--proxy-file',
+                        help=('Load proxy list from text file (one proxy ' +
+                              'per line), overrides -px/--proxy.'))
     parser.add_argument('--db-type', help='Type of database to be used (default: sqlite).',
                         default='sqlite')
     parser.add_argument('--db-name', help='Name of the database to be used.')
@@ -250,10 +263,11 @@ def get_args():
             time.sleep(5)
             sys.exit(1)
 
-        if args.usestops and not args.skip_empty:
-            print("Cannot use stops for scanning except in --skip-empty mode")
-            time.sleep(5)
-            sys.exit(1)
+        if args.usestops:
+            if not args.skip_empty and not args.spawnpoint_scanning:
+                print("Cannot use stops for scanning except in --skip-empty mode")
+                time.sleep(5)
+                sys.exit(1)
 
     if args.only_server:
         if args.location is None:
@@ -597,3 +611,54 @@ def clear_dict_response(response, keep_inventory=False):
     if 'GET_BUDDY_WALKED' in response['responses']:
         del response['responses']['GET_BUDDY_WALKED']
     return response
+
+IPHONES = {'iPhone5,1': 'N41AP',
+           'iPhone5,2': 'N42AP',
+           'iPhone5,3': 'N48AP',
+           'iPhone5,4': 'N49AP',
+           'iPhone6,1': 'N51AP',
+           'iPhone6,2': 'N53AP',
+           'iPhone7,1': 'N56AP',
+           'iPhone7,2': 'N61AP',
+           'iPhone8,1': 'N71AP',
+           'iPhone8,2': 'N66AP',
+           'iPhone8,4': 'N69AP',
+           'iPhone9,1': 'D10AP',
+           'iPhone9,2': 'D11AP',
+           'iPhone9,3': 'D101AP',
+           'iPhone9,4': 'D111AP'}
+
+
+def generate_device_info(identifier):
+    md5 = hashlib.md5()
+    md5.update(identifier)
+    pick_hash = int(md5.hexdigest(), 16)
+
+    device_info = {'device_brand': 'Apple', 'device_model': 'iPhone',
+                   'hardware_manufacturer': 'Apple',
+                   'firmware_brand': 'iPhone OS'}
+    devices = tuple(IPHONES.keys())
+
+    ios8 = ('8.0', '8.0.1', '8.0.2', '8.1', '8.1.1',
+            '8.1.2', '8.1.3', '8.2', '8.3', '8.4', '8.4.1')
+    ios9 = ('9.0', '9.0.1', '9.0.2', '9.1', '9.2', '9.2.1',
+            '9.3', '9.3.1', '9.3.2', '9.3.3', '9.3.4', '9.3.5')
+    ios10 = ('10.0', '10.0.1', '10.0.2', '10.0.3', '10.1', '10.1.1')
+
+    device_pick = devices[pick_hash % len(devices)]
+    device_info['device_model_boot'] = device_pick
+    device_info['hardware_model'] = IPHONES[device_pick]
+    device_info['device_id'] = md5.hexdigest()
+
+    if device_pick in ('iPhone9,1', 'iPhone9,2', 'iPhone9,3', 'iPhone9,4'):
+        ios_pool = ios10
+    elif device_pick in ('iPhone8,1', 'iPhone8,2', 'iPhone8,4'):
+        ios_pool = ios9 + ios10
+    else:
+        ios_pool = ios8 + ios9 + ios10
+
+    device_info['firmware_type'] = ios_pool[pick_hash % len(ios_pool)]
+    return device_info
+
+def cellid(loc):
+    return CellId.from_lat_lng(LatLng.from_degrees(loc[0], loc[1])).to_token()

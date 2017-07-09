@@ -300,8 +300,12 @@ class SpawnScan(BaseScheduler):
 
         # No locations yet? Try the database!
         if not self.locations:
-            log.debug('Loading spawn points from database')
-            self.locations = Spawnpoints.get_spawnpoints_in_hex(self.scan_location, self.args.step_limit)
+            if self.args.no_pokemon:
+                log.debug('Loading gyms from database')
+                self.locations = Gym.get_gyms_in_hex(self.scan_location, self.args.step_limit)
+            else:
+                log.debug('Loading spawn points from database')
+                self.locations = Spawnpoints.get_spawnpoints_in_hex(self.scan_location, self.args.step_limit)
 
         # Well shit...
         # if not self.locations:
@@ -310,7 +314,7 @@ class SpawnScan(BaseScheduler):
         # locations[]:
         # {"lat": 37.53079079414139, "lng": -122.28811690874117, "spawnpoint_id": "808f9f1601d", "time": 511
 
-        log.info('Total of %d spawns to track', len(self.locations))
+        log.info('Total of %d points to track', len(self.locations))
 
         # locations.sort(key=itemgetter('time'))
 
@@ -350,7 +354,10 @@ class SpawnScan(BaseScheduler):
                 appears = now() + 3600 - late_by
 
             location['appears'] = appears
-            location['leaves'] = appears + 900
+            if not self.args.no_pokemon:
+                location['leaves'] = appears + 1800
+            elif self.args.no_pokemon:
+                location['leaves'] = appears + 3600
 
         # Put the spawn points in order of next appearance time.
         self.locations.sort(key=itemgetter('appears'))
@@ -360,8 +367,6 @@ class SpawnScan(BaseScheduler):
         retset = []
         for step, location in enumerate(self.locations, 1):
             retset.append((step, (location['lat'], location['lng'], 40.32), location['appears'], location['leaves']))
-
-        del location
 
         return retset
 

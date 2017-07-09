@@ -6,6 +6,7 @@ import calendar
 import sys
 import gc
 import time
+import random
 import re
 from . import cluster
 from peewee import SqliteDatabase, InsertQuery, \
@@ -34,7 +35,7 @@ args = get_args()
 flaskDb = FlaskDB()
 cache = TTLCache(maxsize=100, ttl=60 * 5)
 
-db_schema_version = 10
+db_schema_version = 11
 
 
 class MyRetryDB(RetryOperationalError, PooledMySQLDatabase):
@@ -293,6 +294,17 @@ class Pokemon(BaseModel):
 
     class Meta:
         indexes = ((('latitude', 'longitude'), False),)
+
+    @staticmethod
+    def bulk_copy():
+        query = (Pokemon
+                 .select()
+                 .where((Pokemon.disappear_time <
+                     (datetime.utcnow() - timedelta(hours=args.purge_data))))
+                 .dicts())
+
+        for p in query:
+            InsertQuery(OldPokes, p).upsert().execute()
 
     @staticmethod
     def get_active(swLat, swLng, neLat, neLng, timestamp=0, oSwLat=None, oSwLng=None, oNeLat=None, oNeLng=None):
@@ -627,7 +639,7 @@ class Pokestop(BaseModel):
     @classmethod
     def get_stops_in_hex(cls, center, steps):
 
-        n, e, s, w = hex_bounds(center, steps)
+        n, e, s, w = hex_bounds(center, steps, 0.45)
 
         query = (Pokestop
                  .select(Pokestop.latitude.alias('lat'),
@@ -661,7 +673,17 @@ class Gym(BaseModel):
     gym_id = CharField(primary_key=True, max_length=50)
     team_id = IntegerField()
     guard_pokemon_id = IntegerField()
-    gym_points = IntegerField()
+    #gym_points = IntegerField()
+    total_gym_cp = IntegerField()  # New start
+    slots_available = IntegerField()
+    raid_spawn = DateTimeField(null=True)
+    raid_battle = DateTimeField(null=True)
+    raid_end = DateTimeField(null=True)
+    raid_level = IntegerField(null=True)
+    raid_pokemon_id = IntegerField(null=True)
+    raid_pokemon_cp = IntegerField(null=True)
+    raid_pokemon_move_1 = IntegerField(null=True)
+    raid_pokemon_move_2 = IntegerField(null=True)  # New end
     enabled = BooleanField()
     latitude = DoubleField()
     longitude = DoubleField()
@@ -698,12 +720,14 @@ class Gym(BaseModel):
     @classmethod
     def get_gyms_in_hex(cls, center, steps):
 
-        n, e, s, w = hex_bounds(center, steps)
+        n, e, s, w = hex_bounds(center, steps, 0.45)
 
         query = (Gym
                  .select(Gym.latitude.alias('lat'),
                          Gym.longitude.alias('lng'),
                          Gym.gym_id,
+                         Gym.raid_spawn.alias('start'),
+                         Gym.raid_end.alias('end')
                          ))
         query = (query.where((Gym.latitude <= n) &
                              (Gym.latitude >= s) &
@@ -716,11 +740,30 @@ class Gym(BaseModel):
         circle = get_circle(450, steps)
         filtered = []
 
+
         for idx, sp in enumerate(s):
             if equi_rect_distance(center, (sp['lat'], sp['lng'])) <= circle:
                 filtered.append(s[idx])
+
+        # At this point, 'time' is DISAPPEARANCE time, we're going to morph it to APPEARANCE time.
+        if args.spawnpoint_scanning:
+            for location in filtered:
+                # examples: time    shifted
+                #           0       (   0 + 2700) = 2700 % 3600 = 2700 (0th minute to 45th minute, 15 minutes prior to appearance as time wraps around the hour.)
+                #           1800    (1800 + 2700) = 4500 % 3600 =  900 (30th minute, moved to arrive at 15th minute.)
+                # todo: this DOES NOT ACCOUNT for pokemons that appear sooner and live longer, but you'll _always_ have at least 15 minutes, so it works well enough.
+                if location['start'] and location['end'] > datetime.utcnow():
+                    location['time'] = date_secs(location['start'])
+                else:
+                    location['time'] = cur_sec() + 60
+
+        log.debug('Spawnpoints: {}'.format(len(filtered)))
+        if args.sscluster and args.spawnpoint_scanning:
+            filtered = cluster.main(filtered, 450, 120)
+            log.debug('Clusters: {}'.format(len(filtered)))
         
         return filtered
+
 
     @staticmethod
     def get_gyms(swLat, swLng, neLat, neLng, timestamp=0, oSwLat=None, oSwLng=None, oNeLat=None, oNeLng=None):
@@ -769,6 +812,8 @@ class Gym(BaseModel):
         for g in results:
             g['name'] = None
             g['pokemon'] = []
+            if g['raid_pokemon_id']:
+               g['raid_pokemon_name'] = get_pokemon_name(g['raid_pokemon_id'])
             gyms[g['gym_id']] = g
             gym_ids.append(g['gym_id'])
 
@@ -815,7 +860,6 @@ class Gym(BaseModel):
                           GymDetails.name,
                           GymDetails.description,
                           Gym.guard_pokemon_id,
-                          Gym.gym_points,
                           Gym.latitude,
                           Gym.longitude,
                           Gym.last_modified,
@@ -951,6 +995,7 @@ class WorkerStatus(BaseModel):
     thread = IntegerField(null=True, index=True)
     # 0 = Unused, 1 = In use, 2 = Failed, 3 = Resting, 4 = Exception, 5 = Ban
     message = CharField(max_length=255)
+    level = IntegerField(default=1, index=True)
     
     @classmethod
     def get_active(cls, name=''):
@@ -989,7 +1034,7 @@ class WorkerStatus(BaseModel):
                             'last_modified': datetime.utcnow(),
                             'lat': None,
                             'lon': None,
-                            'last_scan': 0,
+                            'last_scan': None,
                             'flag': 0,
                             'message': 'Unused'
                             }
@@ -1245,7 +1290,7 @@ def construct_pokemon_dict(pokemons, p, encounter_result, d_t, nptime, validx):
 
 
 # todo: this probably shouldn't _really_ be in "models" anymore, but w/e ¯\_(ツ)_/¯
-def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, api, spawns, key_scheduler):
+def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, api, spawns, key_scheduler, account):
     pokemons = {}
     pokestops = {}
     gyms = {}
@@ -1261,6 +1306,7 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
     blinded = 0
 
     cells = map_dict['responses']['GET_MAP_OBJECTS']['map_cells']
+    level = account['level']
     for cell in cells:
         if config['parse_pokemon']:
             if len(cell.get('wild_pokemons', [])) > 0:
@@ -1325,16 +1371,16 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
                     query = (Spawnpoints
                              .select(Spawnpoints.appear_time, Spawnpoints.valid)  # we just need appearance time, since this got a valid TTH from the server
                              .where(Spawnpoints.spawnpoint_id == p['spawn_point_id']))  # grab matching spawn point
-                    x = list(query.dicts())  # cant seem to get the results otherwise
+                    x = list(query.dictsparse_map())  # cant seem to get the results otherwise
                     db = x[0]  # break the query out of the list
                     atime = max(db['appear_time'], atime)
                     if db['valid'] == 1:  # don't change the disappear time if we already know it.
                         d_t = db['disappear_time'] + hoursecs()
+                    atime = 1800 + (int((db['appear_time'] - 1) / 1800) * 1800)  # keeps or corrects old appearance time now that we have a good TTH
+                    if atime > 3600:
+                        atime = 3600
                 except:
                     log.debug('got a valid timer the first try!')
-                atime = 1800 + (int((db['appear_time'] - 1) / 1800) * 1800)  # keeps or corrects old appearance time now that we have a good TTH
-                if atime > 3600:
-                    atime = 3600
                 valid = 1
             else:
                 # lets see if we've got good data from this spawnpoint before.
@@ -1431,25 +1477,26 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
             encounter_result = None
             if (args.encounter and (p['pokemon_data']['pokemon_id'] in args.encounter_whitelist or
                                     p['pokemon_data']['pokemon_id'] not in args.encounter_blacklist and not args.encounter_whitelist)):
-                time.sleep(args.encounter_delay)
+                time.sleep(args.encounter_delay * random.uniform(0.85, 1))
                 # Set up encounter request envelope
                 if args.hash_key:
                     key = next(key_scheduler)
                     log.debug('Using key {} for this scan.'.format(key))
                     api.activate_hash_server(key)
                 req = api.create_request()
-                encounter_result = req.encounter(encounter_id=p['encounter_id'],
+                req.encounter(encounter_id=p['encounter_id'],
                                                  spawn_point_id=p['spawn_point_id'],
                                                  player_latitude=step_location[0],
                                                  player_longitude=step_location[1])
                 req.check_challenge()
                 req.get_hatched_eggs()
-                req.get_inventory()
+                req.get_inventory(last_timestamp_ms=account['last_timestamp_ms'])
                 req.check_awarded_badges()
-                req.download_settings()
                 req.get_buddy_walked()
-                encounter_result = req.call()
-                encounter_result = clear_dict_response(encounter_result)
+                req.get_inbox(is_history=True)
+                response = req.call()
+                from .search import parse_new_timestamp_ms
+                parse_new_timestamp_ms(account, response)
                 hashuse += 1
                 #HashKeys.addone(key)
             if p['pokemon_data']['pokemon_id'] not in args.ignore_list:
@@ -1588,6 +1635,8 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
                 }
 
             elif config['parse_gyms'] and f.get('type') is None:  # Currently, there are only stops and gyms
+                raid_info = f.get('raid_info', {})
+                raid_pokemon = raid_info.get('raid_pokemon', {})
                 # Send gyms to webhooks.
                 if args.webhooks and not args.webhook_updates_only:
                     # Explicitly set 'webhook_data', in case we want to change the information pushed to webhooks,
@@ -1596,7 +1645,8 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
                         'gym_id': b64encode(str(f['id'])),
                         'team_id': f.get('owned_by_team', 0),
                         'guard_pokemon_id': f.get('guard_pokemon_id', 0),
-                        'gym_points': f.get('gym_points', 0),
+                        #'gym_points': f.get('gym_points', 0),
+                        'gym_points': 0,  # Deprecated
                         'enabled': f['enabled'],
                         'latitude': f['latitude'],
                         'longitude': f['longitude'],
@@ -1607,12 +1657,22 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
                     'gym_id': f['id'],
                     'team_id': f.get('owned_by_team', 0),
                     'guard_pokemon_id': f.get('guard_pokemon_id', 0),
-                    'gym_points': f.get('gym_points', 0),
+                    #'gym_points': f.get('gym_points', 0),
                     'enabled': f['enabled'],
                     'latitude': f['latitude'],
                     'longitude': f['longitude'],
                     'last_modified': datetime.utcfromtimestamp(
                         f['last_modified_timestamp_ms'] / 1000.0),
+                    'slots_available': f.get('slots_available', 0),
+                    'total_gym_cp': f.get('gym_display', {}).get('total_gym_cp', 0),
+                    'raid_level': raid_info.get('raid_level'),
+                    'raid_spawn': db_timestamp(raid_info.get('raid_spawn_ms')),
+                    'raid_end': db_timestamp(raid_info.get('raid_end_ms')),
+                    'raid_battle': db_timestamp(raid_info.get('raid_battle_ms')),
+                    'raid_pokemon_id': raid_pokemon.get('pokemon_id'),
+                    'raid_pokemon_cp': raid_pokemon.get('cp'),
+                    'raid_pokemon_move_1': raid_pokemon.get('move_1'),
+                    'raid_pokemon_move_2': raid_pokemon.get('move_2')
                 }
         del forts
 
@@ -1650,6 +1710,8 @@ def parse_map(args, map_dict, step_location, db_update_queue, wh_update_queue, a
         'blind': blinded
     }
 
+def db_timestamp(tstamp):
+    return None if tstamp is None else datetime.utcfromtimestamp(tstamp / 1000)
 
 def parse_gyms(args, gym_responses, wh_update_queue):
     gym_details = {}
@@ -1659,80 +1721,112 @@ def parse_gyms(args, gym_responses, wh_update_queue):
 
     i = 0
     for g in list(gym_responses.values()):
-        gym_state = g['gym_state']
-        gym_id = gym_state['fort_data']['id']
+        gym_state = g['gym_status_and_defenders']
+        gym_id = gym_state['pokemon_fort_proto']['id']
 
         gym_details[gym_id] = {
             'gym_id': gym_id,
             'name': g['name'],
             'description': g.get('description'),
-            'url': g['urls'][0],
+            'url': g['url'],
         }
 
         if args.webhooks:
             webhook_data = {
                 'id': gym_id,
-                'latitude': gym_state['fort_data']['latitude'],
-                'longitude': gym_state['fort_data']['longitude'],
-                'team': gym_state['fort_data'].get('owned_by_team', 0),
+                'latitude': gym_state['pokemon_fort_proto']['latitude'],
+                'longitude': gym_state['pokemon_fort_proto']['longitude'],
+                'team': gym_state['pokemon_fort_proto'].get('owned_by_team', 0),
                 'name': g['name'],
                 'description': g.get('description'),
-                'url': g['urls'][0],
+                'url': g['url'],
                 'pokemon': [],
             }
 
-        for member in gym_state.get('memberships', []):
-            gym_members[i] = {
-                'gym_id': gym_id,
-                'pokemon_uid': member['pokemon_data']['id'],
-            }
+        for member in gym_state.get('gym_defender', []):
+            pokemon = member['motivated_pokemon']['pokemon']
+            gym_members[i] = {'gym_id': gym_id, 'pokemon_uid': pokemon['id']}
 
             gym_pokemon[i] = {
-                'pokemon_uid': member['pokemon_data']['id'],
-                'pokemon_id': member['pokemon_data']['pokemon_id'],
-                'cp': member['pokemon_data']['cp'],
-                'trainer_name': member['trainer_public_profile']['name'],
-                'num_upgrades': member['pokemon_data'].get('num_upgrades', 0),
-                'move_1': member['pokemon_data'].get('move_1'),
-                'move_2': member['pokemon_data'].get('move_2'),
-                'height': member['pokemon_data'].get('height_m'),
-                'weight': member['pokemon_data'].get('weight_kg'),
-                'stamina': member['pokemon_data'].get('stamina'),
-                'stamina_max': member['pokemon_data'].get('stamina_max'),
-                'cp_multiplier': member['pokemon_data'].get('cp_multiplier'),
-                'additional_cp_multiplier': member['pokemon_data'].get('additional_cp_multiplier', 0),
-                'iv_defense': member['pokemon_data'].get('individual_defense', 0),
-                'iv_stamina': member['pokemon_data'].get('individual_stamina', 0),
-                'iv_attack': member['pokemon_data'].get('individual_attack', 0),
-                'last_seen': datetime.utcnow(),
+                'pokemon_uid':
+                    pokemon['id'],
+                'pokemon_id':
+                    pokemon['pokemon_id'],
+                'cp':
+                    member['motivated_pokemon']['cp_when_deployed'],
+                'trainer_name':
+                    pokemon['owner_name'],
+                'num_upgrades':
+                    pokemon.get('num_upgrades', 0),
+                'move_1':
+                    pokemon.get('move_1'),
+                'move_2':
+                    pokemon.get('move_2'),
+                'height':
+                    pokemon.get('height_m'),
+                'weight':
+                    pokemon.get('weight_kg'),
+                'stamina':
+                    pokemon.get('stamina'),
+                'stamina_max':
+                    pokemon.get('stamina_max'),
+                'cp_multiplier':
+                    pokemon.get('cp_multiplier'),
+                'additional_cp_multiplier':
+                    pokemon.get('additional_cp_multiplier', 0),
+                'iv_defense':
+                    pokemon.get('individual_defense', 0),
+                'iv_stamina':
+                    pokemon.get('individual_stamina', 0),
+                'iv_attack':
+                    pokemon.get('individual_attack', 0),
+                'last_seen':
+                    datetime.utcnow(),
             }
 
             trainers[i] = {
                 'name': member['trainer_public_profile']['name'],
-                'team': gym_state['fort_data']['owned_by_team'],
+                'team': member['trainer_public_profile']['team_color'],
                 'level': member['trainer_public_profile']['level'],
                 'last_seen': datetime.utcnow(),
             }
 
             if args.webhooks:
                 webhook_data['pokemon'].append({
-                    'pokemon_uid': member['pokemon_data']['id'],
-                    'pokemon_id': member['pokemon_data']['pokemon_id'],
-                    'cp': member['pokemon_data']['cp'],
-                    'num_upgrades': member['pokemon_data'].get('num_upgrades', 0),
-                    'move_1': member['pokemon_data'].get('move_1'),
-                    'move_2': member['pokemon_data'].get('move_2'),
-                    'height': member['pokemon_data'].get('height_m'),
-                    'weight': member['pokemon_data'].get('weight_kg'),
-                    'stamina': member['pokemon_data'].get('stamina'),
-                    'stamina_max': member['pokemon_data'].get('stamina_max'),
-                    'cp_multiplier': member['pokemon_data'].get('cp_multiplier'),
-                    'additional_cp_multiplier': member['pokemon_data'].get('additional_cp_multiplier', 0),
-                    'iv_defense': member['pokemon_data'].get('individual_defense', 0),
-                    'iv_stamina': member['pokemon_data'].get('individual_stamina', 0),
-                    'iv_attack': member['pokemon_data'].get('individual_attack', 0),
-                    'trainer_name': member['trainer_public_profile']['name'],
-                    'trainer_level': member['trainer_public_profile']['level'],
+                    'pokemon_uid':
+                        pokemon['id'],
+                    'pokemon_id':
+                        pokemon['pokemon_id'],
+                    'cp':
+                        member['motivated_pokemon']['cp_when_deployed'],
+                    'num_upgrades':
+                        pokemon.get('num_upgrades', 0),
+                    'move_1':
+                        pokemon.get('move_1'),
+                    'move_2':
+                        pokemon.get('move_2'),
+                    'height':
+                        pokemon.get('height_m'),
+                    'weight':
+                        pokemon.get('weight_kg'),
+                    'stamina':
+                        pokemon.get('stamina'),
+                    'stamina_max':
+                        pokemon.get('stamina_max'),
+                    'cp_multiplier':
+                        pokemon.get('cp_multiplier'),
+                    'additional_cp_multiplier':
+                        pokemon.get('additional_cp_multiplier', 0),
+                    'iv_defense':
+                        pokemon.get('individual_defense', 0),
+                    'iv_stamina':
+                        pokemon.get('individual_stamina', 0),
+                    'iv_attack':
+                        pokemon.get('individual_attack', 0),
+                    'trainer_name':
+                        member['trainer_public_profile']['name'],
+                    'trainer_level':
+                        member['trainer_public_profile']['level'],
                 })
 
             i += 1
@@ -1848,13 +1942,23 @@ def clean_db_loop(args):
                      .where(Pokestop.lure_expiration < datetime.utcnow()))
             query.execute()
 
+            # Remove RAIDs after they expire
+            query = (Gym
+                     .update(raid_pokemon_id=None, raid_pokemon_cp=None, raid_pokemon_move_1=None, raid_pokemon_move_2=None, raid_level=None, raid_battle=None, raid_end=None, raid_spawn=None)
+                     .where(Gym.raid_end < datetime.utcnow()))
+            query.execute()
+
             # If desired, clear old pokemon spawns.
-            if args.purge_data > 0:
-                query = (Pokemon
-                         .delete()
-                         .where((Pokemon.disappear_time <
-                                (datetime.utcnow() - timedelta(hours=args.purge_data)))))
-                query.execute()
+            if args.purge_data < 1:  # copy old pokemon into the new table
+                log.info('Bulk copying old pokemon to new table')
+                Pokemon.bulk_copy()
+                log.info('Bulk copy completed, now deleting old pokemon')
+
+            query = (Pokemon
+                     .delete()
+                     .where((Pokemon.disappear_time <
+                            (datetime.utcnow() - timedelta(hours=args.purge_data)))))
+            query.execute()
 
             log.info('Regular database cleaning complete')
             time.sleep(60)
@@ -2005,7 +2109,28 @@ def database_migrate(db, old_ver):
             migrator.add_column('workerstatus', 'last_scan', IntegerField(default=0)),
             migrator.add_column('workerstatus', 'flag', IntegerField(default=0))
         )
-
+    if old_ver < 11:
+        migrate(
+            migrator.rename_column('gym', 'gym_points', 'total_gym_cp'),
+            migrator.add_column('gym', 'slots_available',
+                                IntegerField(default=6)),
+            migrator.add_column('gym', 'raid_pokemon_id',
+                                IntegerField(null=True)),
+            migrator.add_column('gym', 'raid_pokemon_cp',
+                                IntegerField(null=True)),
+            migrator.add_column('gym', 'raid_pokemon_move_1',
+                                IntegerField(null=True)),
+            migrator.add_column('gym', 'raid_pokemon_move_2',
+                                IntegerField(null=True)),
+            migrator.add_column('gym', 'raid_battle',
+                                DateTimeField(null=True)),
+            migrator.add_column('gym', 'raid_end',
+                                DateTimeField(null=True)),
+            migrator.add_column('gym', 'raid_spawn',
+                                DateTimeField(null=True)),
+            migrator.add_column('gym', 'raid_level',
+                                IntegerField(null=True))
+        )
 def numberToBase(n, b):
     if n == 0:
         return [0]
