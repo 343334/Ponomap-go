@@ -15,7 +15,6 @@ var $selectOpenGymsOnly
 var $selectTeamGymsOnly
 var $selectLastUpdateGymsOnly
 var $selectMinGymLevel
-var $selectMaxGymLevel
 var $selectLuredPokestopsOnly
 var $selectSearchIconMarker
 var $selectGymMarkerStyle
@@ -31,7 +30,7 @@ var languageLookupThreshold = 3
 var searchMarkerStyles
 
 var timestamp
-var deleteSpawnpoint = []
+var ghostId = []
 var excludedPokemon = []
 var excludedRarity = []
 var excludedType = []
@@ -105,10 +104,10 @@ function removePokemonMarker (encounterId) { // eslint-disable-line no-unused-va
   mapData.pokemons[encounterId].hidden = true
 }
 
-function removeSpawnpoint (spawnpoint_id) { // eslint-disable-line no-unused-vars
-  mapData.spawnpoints[spawnpoint_id].marker.setMap(null)
-  mapData.spawnpoints[spawnpoint_id].hidden = true
-  deleteSpawnpoint.push(spawnpoint_id)
+function reportGhost (encounter_id) { // eslint-disable-line no-unused-vars
+  mapData.pokemons[encounter_id].marker.setMap(null)
+  mapData.pokemons[encounter_id].hidden = true
+  ghostId.push(encounter_id)
 }
 
 function initMap () { // eslint-disable-line no-unused-vars
@@ -340,7 +339,6 @@ function initSidebar () {
   $('#team-gyms-only-switch').val(Store.get('showTeamGymsOnly'))
   $('#open-gyms-only-switch').val(Store.get('showOpenGymsOnly'))
   $('#min-level-gyms-filter-switch').val(Store.get('minGymLevel'))
-  $('#max-level-gyms-filter-switch').val(Store.get('maxGymLevel'))
   $('#last-update-gyms-switch').val(Store.get('showLastUpdatedGymsOnly'))
   $('#pokemon-switch').prop('checked', Store.get('showPokemon'))
   $('#pokestops-switch').prop('checked', Store.get('showPokestops'))
@@ -402,7 +400,7 @@ function getTimeStr(t) {
     return dateStr
 }
 
-function pokemonLabel (name, rarity, types, disappearTime, id, latitude, longitude, encounterId, atk, def, sta, move1, move2, valid, weight, height, gender, form, last_modified, spawnpoint_id) {
+function pokemonLabel (name, rarity, types, disappearTime, id, latitude, longitude, encounterId, atk, def, sta, move1, move2, valid, weight, height, gender, form, last_modified, spawnpoint_id, ghost) {
   var disappearDate = new Date(disappearTime)
   var foundDate = new Date(last_modified)
   var rarityDisplay = rarity ? '(' + rarity + ')' : ''
@@ -424,7 +422,12 @@ function pokemonLabel (name, rarity, types, disappearTime, id, latitude, longitu
   }
 
   if (valid == 1) {
-    var dspawn = `Verified timer`
+	if (ghost > 0) {
+		var dspawn = `Reported Ghost (${ghost}) `
+	} else {
+		var dspawn = `Verified timer `
+	}
+    dspawn += `<a href='javascript:reportGhost("${encounterId}")'>Report</a></b>`
   } else {
     var dspawn = `Unverified timer`
   }
@@ -612,7 +615,7 @@ function pokestopLabel (expireTime, latitude, longitude) {
       <div>
         <b>Pokéstop</b>
       </div>
-        <a href='javascript:void(0);' onclick='javascript:openMapDirections(${latitude},${longitude});' title='View in Maps'>Get directions</a>&nbsp;&nbsp
+        <a href='javascript:void(0);' onclick='javascript:openMapDirections(${latitude},${longitude});' title='View in Maps'>Get directions</a>
       </div>`
   }
 
@@ -623,11 +626,11 @@ function getGymMarkerIconURL(item) {
     var slots_occupied = (6 - item['slots_available'])
     if (item['raid_pokemon_id'] != null) {
         console.log("Got RAID STARTED with Pokemon " + item['raid_pokemon_id'])
-        return 'static/forts/shield/' + gymTypes[item['team_id']] + item['raid_level'] + '_raid_' + item['raid_pokemon_id'] + '.png'
+        return 'static/forts/shield/' + gymTypes[item['team_id']] + '_' + item['raid_level'] + '_raid_' + item['raid_pokemon_id'] + '.png'
     } else if (item['raid_level'] != null) {
         var raidEgg = item['raid_level'] <= 2 ? 'normal' : 'rare'
         console.log("Got RAID SPAWNED with Egg " + raidEgg)
-        return 'static/forts/shield/' + gymTypes[item['team_id']] + item['raid_level'] + '_raid_' + raidEgg + '.png'
+        return 'static/forts/shield/' + gymTypes[item['team_id']] + '_' + item['raid_level'] + '_raid_' + raidEgg + '.png'
     } else {
         return 'static/forts/' + Store.get('gymMarkerStyle') + '/' + gymTypes[item['team_id']] + (item['team_id'] !== 0 ? '_' + slots_occupied : '') + '.png'
     }
@@ -641,8 +644,7 @@ function formatSpawnTime (seconds) {
 function spawnpointLabel (item) {
   var str = `
     <div>
-      <b>Spawn Point ${item.spawnpoint_id} <div>
-	    <a href='javascript:removeSpawnpoint("${item.spawnpoint_id}")'>Remove</a>&nbsp;&nbsp</b>
+      <b>Spawn Point ${item.spawnpoint_id}</b>
     </div>
     <div>
       Every hour from ${formatSpawnTime(item.time)} to ${formatSpawnTime(item.time + item.appear_time)}
@@ -715,7 +717,7 @@ function customizePokemonMarker (marker, item, skipNotification) {
   }
 
   marker.infoWindow = new google.maps.InfoWindow({
-    content: pokemonLabel(item['pokemon_name'], item['pokemon_rarity'], item['pokemon_types'], item['disappear_time'], item['pokemon_id'], item['latitude'], item['longitude'], item['encounter_id'], item['individual_attack'], item['individual_defense'], item['individual_stamina'], item['move_1'], item['move_2'], item['valid'], item['weight'], item['height'], item['gender'], item['form'], item['last_modified'], item['spawnpoint_id']),
+    content: pokemonLabel(item['pokemon_name'], item['pokemon_rarity'], item['pokemon_types'], item['disappear_time'], item['pokemon_id'], item['latitude'], item['longitude'], item['encounter_id'], item['individual_attack'], item['individual_defense'], item['individual_stamina'], item['move_1'], item['move_2'], item['valid'], item['weight'], item['height'], item['gender'], item['form'], item['last_modified'], item['spawnpoint_id'], item['ghost']),
     disableAutoPan: true
   })
 
@@ -1117,7 +1119,7 @@ function loadRawData () {
       'scanned': loadScanned,
       'lastslocs': lastslocs,
       'spawnpoints': loadSpawnpoints,
-	  'rsids': String(deleteSpawnpoint),
+	  'rghost': String(ghostId),
       'lastspawns': lastspawns,
       'swLat': swLat,
       'swLng': swLng,
@@ -1131,7 +1133,6 @@ function loadRawData () {
       'eids': String(excludedPokemon)
     },
     dataType: 'json',
-
     cache: false,
     beforeSend: function () {
       if (rawDataIsLoading) {
@@ -1142,7 +1143,7 @@ function loadRawData () {
     },
     complete: function () {
       rawDataIsLoading = false
-	  deleteSpawnpoint = []
+	  ghostId = []
     }
   })
 }
@@ -1244,8 +1245,9 @@ function processGyms (i, item) {
   if (item.raid_level < 1) {
 	  var gymLevel = 6 - item.slots_available
   } else {
-	  var gymLevel = item.raid_level
+	  var gymLevel = item['raid_level']
   }
+  var openslots = item.slots_available
   var removeGymFromMap = function (gymid) {
       if (mapData.gyms[gymid] && mapData.gyms[gymid].marker) {
           if (mapData.gyms[gymid].marker.rangeCircle) {
@@ -1256,21 +1258,12 @@ function processGyms (i, item) {
       }
   }
 
-  var gymHasOpenSpot = function (gymLevel, pokemonInGym) {
-      return gymLevel > item.pokemon.length && item.pokemon.length !== 0
+  var gymHasOpenSpot = function (openslots, pokemonInGym) {
+      return openslots > 0 && item.pokemon.length !== 0
   }
 
   if (Store.get('showOpenGymsOnly') === 1) {
-      if (!gymHasOpenSpot(gymLevel, item.pokemon.length)) {
-          removeGymFromMap(item['gym_id'])
-          return true
-      }
-  }
-
-  if (Store.get('showOpenGymsOnly') > 1) {
-      var closePrestige = 0
-
-      if (!gymHasOpenSpot(gymLevel, item.pokemon.length) && (gymPrestige[gymLevel - 1] > closePrestige + item.gym_points || gymLevel === 10)) {
+      if (!gymHasOpenSpot(openslots, item.pokemon.length)) {
           removeGymFromMap(item['gym_id'])
           return true
       }
@@ -1289,22 +1282,22 @@ function processGyms (i, item) {
       }
   }
 
-  if (gymLevel < Store.get('minGymLevel')) {
+  if (item['raid_level'] < Store.get('minGymLevel')) {
       removeGymFromMap(item['gym_id'])
       return true
   }
-
-  if (gymLevel > Store.get('maxGymLevel')) {
-      removeGymFromMap(item['gym_id'])
-      return true
-  }
-
 
   if (item['gym_id'] in mapData.gyms) {
     item.marker = updateGymMarker(item, mapData.gyms[item['gym_id']].marker)
   } else { // add marker to map and item to dict
     item.marker = setupGymMarker(item)
   }
+  
+  var now = new Date()
+  if (item['raid_end'] < now.getTime()) {
+	  removeGymFromMap(item['gym_id'])
+  }
+	  
   mapData.gyms[item['gym_id']] = item
 }
 
@@ -1689,11 +1682,15 @@ function showGymDetails (id) { // eslint-disable-line no-unused-vars
   })
 
   data.done(function (result) {
-    var gymLevel = result.raid_level
+    if (result.raid_level < 1) {
+	  var gymLevel = 6 - result.slots_available
+    } else {
+	  var gymLevel = result.raid_level
+    }
     var nextLvlPrestige = gymPrestige[gymLevel - 1] || 50000
     var prestigePercentage = (result.gym_points / nextLvlPrestige) * 100
     var lastScannedDate = new Date(result.last_scanned)
-    var freeSlots = result.pokemon.length ? gymLevel - result.pokemon.length : 0
+    var freeSlots = result.slots_available
     var freeSlotsStr = freeSlots ? ` - ${freeSlots} Free Slots` : ''
     var gymLevelStr = ''
 
@@ -1963,19 +1960,6 @@ $(function () {
 
   $selectMinGymLevel.on('change', function () {
       Store.set('minGymLevel', this.value)
-      lastgyms = false
-      updateMap()
-  })
-
-  $selectMaxGymLevel = $('#max-level-gyms-filter-switch')
-
-  $selectMaxGymLevel.select2({
-      placeholder: 'Maximum Gym Level',
-      minimumResultsForSearch: Infinity
-  })
-
-  $selectMaxGymLevel.on('change', function () {
-      Store.set('maxGymLevel', this.value)
       lastgyms = false
       updateMap()
   })
