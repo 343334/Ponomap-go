@@ -298,14 +298,20 @@ class SpawnScan(BaseScheduler):
             except IOError as e:
                 log.error('Error opening json file: %s; will fallback to database', e)
 
+        templist = []
         # No locations yet? Try the database!
         if not self.locations:
             if self.args.no_pokemon:
                 log.debug('Loading gyms from database')
-                self.locations = Gym.get_gyms_in_hex(self.scan_location, self.args.step_limit)
+                if not self.args.no_gyms:
+                    templist += Gym.get_gyms_in_hex(self.scan_location, self.args.step_limit)
+                if not self.args.no_pokestops:
+                    templist += Pokestop.get_stops_in_hex(self.scan_location, self.args.step_limit)
             else:
                 log.debug('Loading spawn points from database')
-                self.locations = Spawnpoints.get_spawnpoints_in_hex(self.scan_location, self.args.step_limit)
+                templist += Spawnpoints.get_spawnpoints_in_hex(self.scan_location, self.args.step_limit)
+
+        self.locations = templist
 
         # Well shit...
         # if not self.locations:
@@ -327,7 +333,11 @@ class SpawnScan(BaseScheduler):
 
         # 'time' from json and db alike has been munged to appearance time as seconds after the hour.
         # Here we'll convert that to a real timestamp.
+        spreademout = 50
         for location in self.locations:
+            if 'time' not in location:
+                spreademout += 10
+                location['time'] = cur_sec() + spreademout
             # For a scan which should cover all CURRENT pokemon, we can offset
             # the comparison time by 15 minutes so that the "appears" time
             # won't be rolled over to the next hour.
@@ -356,7 +366,7 @@ class SpawnScan(BaseScheduler):
             location['appears'] = appears
             if not self.args.no_pokemon:
                 location['leaves'] = appears + 1800
-            elif self.args.no_pokemon:
+            else:
                 location['leaves'] = appears + 3600
 
         # Put the spawn points in order of next appearance time.
@@ -365,7 +375,7 @@ class SpawnScan(BaseScheduler):
         # Match expected structure:
         # locations = [((lat, lng, alt), ts_appears, ts_leaves),...]
         retset = []
-        for step, location in enumerate(self.locations, 1):
+        for step, location in enumerate(self.locations, 0):
             retset.append((step, (location['lat'], location['lng'], 40.32), location['appears'], location['leaves']))
 
         return retset

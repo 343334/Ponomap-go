@@ -37,7 +37,6 @@ from datetime import datetime, timedelta
 from dateutils import timezone
 from threading import Thread, Lock
 from queue import Queue, Empty
-from retrying import retry
 from requests.exceptions import ProxyError
 
 from pgoapi import PGoApi
@@ -593,27 +592,27 @@ def ringappend(args, loc, results, steps):
         if config['parse_pokemon']:
             spawns = Spawnpoints.get_spawnpoints_in_hex(loc, steps)
             if len(spawns) > 0:
-                points.append(spawns)
-                del spawns
-                #log.debug(len(spawns))  # True number of spawns
-                #log.debug(len(spawns[0]))  # Always 4 (lat/lon/appear/disappear dict)
-                #log.debug(len(points))  # Always 1
-                #log.debug(len(points[0]))  # True number of spawns
+                log.debug('spawns: {}'.format(len(spawns)))
+                points += spawns
         if args.usestops:
-            gyms = Gym.get_gyms_in_hex(loc, steps)
-            stops = Pokestop.get_stops_in_hex(loc, steps)
-            if len(gyms) > 0:
-                points.append(gyms)
-                del gyms
-            if len(stops) > 0:
-                points.append(stops)
-                del stops
-        
+            if not args.no_gyms:
+                gyms = Gym.get_gyms_in_hex(loc, steps)
+                if len(gyms) > 0:
+                    log.debug('gyms: {}'.format(len(gyms)))
+                    points += gyms
+            if not args.no_pokestops:
+                stops = Pokestop.get_stops_in_hex(loc, steps)
+                if len(stops) > 0:
+                    points += stops
+                    log.debug('stops: {}'.format(len(stops)))
+
     if args.scheduler == 'HexSearch':
         results.append((loc[0], loc[1], 0, len(points)))
+        log.debug('ringappend found: {} Spawns, {} Gyms and {} stops'.format(len(spawns), len(gyms), len(stops)))
     else:
         if len(points) > 0:
-            results.append((loc[0], loc[1], 0, len(points[0])))
+            results.append((loc[0], loc[1], 0, len(points)))
+            log.debug('ringappend found: {} Spawns, {} Gyms and {} stops'.format(len(spawns), len(gyms), len(stops)))
 
     return results
 

@@ -7,6 +7,7 @@ import sys
 import gc
 import time
 import random
+import math
 import re
 from . import cluster
 from peewee import SqliteDatabase, InsertQuery, \
@@ -736,14 +737,17 @@ class Gym(BaseModel):
                              ))
 
         s = list(query.dicts())
+        if len(s) > 0:
+            log.debug('Found these in the database: {}'.format(len(s)))
 
-        circle = get_circle(450, steps)
+        circle = get_circle(500, steps)
         filtered = []
 
-
+        spawnz = 0
         for idx, sp in enumerate(s):
             if equi_rect_distance(center, (sp['lat'], sp['lng'])) <= circle:
                 filtered.append(s[idx])
+                spawnz = idx
 
         # At this point, 'time' is DISAPPEARANCE time, we're going to morph it to APPEARANCE time.
         if args.spawnpoint_scanning:
@@ -757,10 +761,12 @@ class Gym(BaseModel):
                 else:
                     location['time'] = cur_sec() + 60
 
-        log.debug('Spawnpoints: {}'.format(len(filtered)))
+        if spawnz > 0:
+            log.debug('Filtered Spawnpoints: {}'.format(spawnz))
         if args.sscluster and args.spawnpoint_scanning:
             filtered = cluster.main(filtered, 450, 120)
-            log.debug('Clusters: {}'.format(len(filtered)))
+            if len(filtered) > 0:
+                log.debug('Clusters: {}'.format(len(filtered)))
         
         return filtered
 
@@ -990,7 +996,7 @@ class WorkerStatus(BaseModel):
     last_modified = DateTimeField(index=True)
     lat = DoubleField(null=True, index=True)
     lon = DoubleField(null=True, index=True)
-    last_scan = IntegerField(default=0, index=True)
+    last_scan = IntegerField(default=0, index=True, null=True)
     flag = IntegerField(default=0)
     thread = IntegerField(null=True, index=True)
     # 0 = Unused, 1 = In use, 2 = Failed, 3 = Resting, 4 = Exception, 5 = Ban
@@ -2149,7 +2155,8 @@ def checkspawns(mainlist, removelist):
     return remaining
 
 def get_circle(radius, steps):
-    overlap = 0.8660257142857143 * radius
+    #overlap = 0.8660257142857143 * radius
+    overlap = math.sqrt(3) * radius
     step_distance = ((steps - 1) * overlap) + radius
 
     return step_distance
